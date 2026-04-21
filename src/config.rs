@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
 // ──────────────────────────────────────────────────────────────────────────────
-// COTIZACIÓN  (definida acá para poder serializarla)
+// COTIZACIÓN  (serializable para historial persistente)
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -11,6 +11,10 @@ pub struct Cotizacion {
     pub precio:     f64,
     pub precio_usd: f64,
     pub costo_base: f64,
+    #[serde(default)]
+    pub gramos: f64,
+    #[serde(default)]
+    pub horas:  f64,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -35,13 +39,40 @@ pub const PERFILES: &[PerfilImpresora] = &[
 ];
 
 // ──────────────────────────────────────────────────────────────────────────────
+// TIPOS DE FILAMENTO
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[allow(dead_code)]
+pub struct PerfilMaterial {
+    pub nombre:        &'static str,
+    pub densidad:      f64,     // g/cm³
+    pub precio_ref_kg: f64,     // precio de referencia ARS
+    pub temp_hotend:   u16,
+    pub temp_cama:     u16,
+    pub nota:          &'static str,
+}
+
+pub const MATERIALES: &[PerfilMaterial] = &[
+    PerfilMaterial { nombre: "PLA",     densidad: 1.24, precio_ref_kg: 12_000.0, temp_hotend: 200, temp_cama:  60, nota: "Fácil de imprimir, biodegradable. Ideal para piezas estéticas." },
+    PerfilMaterial { nombre: "PETG",    densidad: 1.27, precio_ref_kg: 15_000.0, temp_hotend: 235, temp_cama:  80, nota: "Resistente a humedad y golpes. Buena relación precio/durabilidad." },
+    PerfilMaterial { nombre: "ABS",     densidad: 1.04, precio_ref_kg: 13_000.0, temp_hotend: 245, temp_cama: 100, nota: "Resistente al calor. Requiere recinto cerrado y buena ventilación." },
+    PerfilMaterial { nombre: "TPU 95A", densidad: 1.20, precio_ref_kg: 22_000.0, temp_hotend: 230, temp_cama:  45, nota: "Flexible y elástico. Impresión lenta, retracción mínima." },
+    PerfilMaterial { nombre: "ASA",     densidad: 1.07, precio_ref_kg: 18_000.0, temp_hotend: 250, temp_cama: 100, nota: "Como ABS pero resistente a UV. Ideal para piezas exteriores." },
+    PerfilMaterial { nombre: "PETG-CF", densidad: 1.30, precio_ref_kg: 28_000.0, temp_hotend: 250, temp_cama:  85, nota: "Alta rigidez y resistencia. Desgasta boquillas de bronce." },
+];
+
+// ──────────────────────────────────────────────────────────────────────────────
 // CONFIG PERSISTENTE
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct AppConfig {
-    pub valores:    Vec<String>,  // valor (string) de cada campo
-    pub perfil_idx: usize,
+    pub valores:     Vec<String>,
+    pub perfil_idx:  usize,
+    #[serde(default)]
+    pub material_idx: usize,
+    #[serde(default)]
+    pub recientes:   Vec<String>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -53,7 +84,7 @@ fn config_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
         .join(".config")
-        .join("calculadora_pla")
+        .join("condorlab")
 }
 
 fn config_path()    -> PathBuf { config_dir().join("config.json")    }

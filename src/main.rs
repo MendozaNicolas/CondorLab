@@ -145,7 +145,7 @@ fn calcular(campos: &[Campo; NUM_CAMPOS]) -> Calc {
 // APP STATE
 // ──────────────────────────────────────────────────────────────────────────────
 
-enum PantallaActiva { Principal, Historial, Ayuda, Archivos, Vista3D }
+enum PantallaActiva { Principal, Historial, Ayuda, Archivos, Vista3D, Recientes }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // EXPLORADOR DE ARCHIVOS
@@ -289,6 +289,9 @@ struct App {
     rot_z:        f32,
     zoom_3d:      f32,
     perfil_idx:       usize,
+    material_idx:     usize,
+    recientes:        Vec<String>,
+    sel_reciente:     usize,
     auto_rotar:       bool,
     normals_suaves:   Vec<[[f32;3];3]>,
     paleta_3d:        u8,
@@ -300,9 +303,11 @@ struct App {
 
 impl App {
     fn new() -> Self {
-        let cfg       = config::cargar_config();
-        let historial = config::cargar_historial();
-        let perfil_idx = cfg.perfil_idx.min(config::PERFILES.len() - 1);
+        let cfg          = config::cargar_config();
+        let historial    = config::cargar_historial();
+        let perfil_idx   = cfg.perfil_idx.min(config::PERFILES.len() - 1);
+        let material_idx = cfg.material_idx.min(config::MATERIALES.len() - 1);
+        let recientes    = cfg.recientes.clone();
 
         let mut app = Self {
             campos: [
@@ -331,6 +336,9 @@ impl App {
             tris_norm: Vec::new(),
             normals_suaves: Vec::new(),
             perfil_idx,
+            material_idx,
+            recientes,
+            sel_reciente: 0,
             rot_x: -0.4,
             rot_y:  0.6,
             rot_z:  0.0,
@@ -360,22 +368,42 @@ impl App {
         if p.mant_hr   > 0.0 { self.campos[F_MANT].valor      = format!("{}", p.mant_hr   as u32); }
     }
 
+    fn aplicar_material(&mut self) {
+        let m = &config::MATERIALES[self.material_idx];
+        self.campos[F_PRECIO_KG].valor = format!("{:.0}", m.precio_ref_kg);
+        if let Some(ref stl) = self.info_stl {
+            self.campos[F_GRAMOS].valor = format!("{:.1}", stl.volumen_cm3 * m.densidad);
+        }
+    }
+
+    fn agregar_reciente(&mut self, ruta: &str) {
+        self.recientes.retain(|r| r != ruta);
+        self.recientes.insert(0, ruta.to_string());
+        self.recientes.truncate(10);
+        self.guardar_estado();
+    }
+
     fn guardar_estado(&self) {
         config::guardar_config(&config::AppConfig {
-            valores:    self.campos.iter().map(|c| c.valor.clone()).collect(),
-            perfil_idx: self.perfil_idx,
+            valores:      self.campos.iter().map(|c| c.valor.clone()).collect(),
+            perfil_idx:   self.perfil_idx,
+            material_idx: self.material_idx,
+            recientes:    self.recientes.clone(),
         });
     }
 
     fn guardar_cotizacion(&mut self) {
-        let calc = calcular(&self.campos);
-        let num = self.historial.len() + 1;
+        let calc   = calcular(&self.campos);
+        let num    = self.historial.len() + 1;
         let gramos = self.campos[F_GRAMOS].parsed();
+        let horas  = self.campos[F_HORAS].parsed();
         self.historial.push(Cotizacion {
-            label: format!("#{num}  {:.0}g · {:.0}h", gramos, self.campos[F_HORAS].parsed()),
+            label: format!("#{num}  {:.0}g · {:.1}h", gramos, horas),
             precio: calc.precio,
             precio_usd: calc.precio_usd,
             costo_base: calc.costo_base,
+            gramos,
+            horas,
         });
         self.guardado_msg = Some(30);
         config::guardar_historial(&self.historial);
@@ -457,6 +485,25 @@ impl App {
                 self.pantalla = PantallaActiva::Principal;
                 return;
             }
+            PantallaActiva::Recientes => {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => self.pantalla = PantallaActiva::Principal,
+                    KeyCode::Up   | KeyCode::BackTab  => {
+                        self.sel_reciente = self.sel_reciente.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Tab => {
+                        let max = self.recientes.len().saturating_sub(1);
+                        if self.sel_reciente < max { self.sel_reciente += 1; }
+                    }
+                    KeyCode::Enter => {
+                        if let Some(ruta) = self.recientes.get(self.sel_reciente).cloned() {
+                            self.abrir_archivo(PathBuf::from(ruta));
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
             PantallaActiva::Principal => {}
         }
 
@@ -475,6 +522,14 @@ impl App {
             (KeyCode::Char('p'), _) => {
                 self.perfil_idx = (self.perfil_idx + 1) % config::PERFILES.len();
                 self.aplicar_perfil();
+            }
+            (KeyCode::Char('m'), _) => {
+                self.material_idx = (self.material_idx + 1) % config::MATERIALES.len();
+                self.aplicar_material();
+            }
+            (KeyCode::Char('f'), _) => {
+                self.sel_reciente = 0;
+                self.pantalla = PantallaActiva::Recientes;
             }
             (KeyCode::Char('s'), _) => self.guardar_cotizacion(),
             (KeyCode::Char('h'), _) => self.pantalla = PantallaActiva::Historial,
@@ -514,7 +569,8 @@ impl App {
         match ext.as_str() {
             "stl" => match archivo::cargar_stl(&ruta_str) {
                 Ok(info) => {
-                    self.campos[F_GRAMOS].valor = format!("{:.1}", info.gramos_pla);
+                    let densidad = config::MATERIALES[self.material_idx].densidad;
+                    self.campos[F_GRAMOS].valor = format!("{:.1}", info.volumen_cm3 * densidad);
                     self.tris_norm = wireframe::normalizar(&info.tris);
                     self.normals_suaves = wireframe::calcular_normales_suaves(&self.tris_norm);
                     self.rot_x = -0.4; self.rot_y = 0.6; self.rot_z = 0.0;
@@ -522,6 +578,7 @@ impl App {
                     self.info_stl = Some(info);
                     self.nav.error = None;
                     self.pantalla = PantallaActiva::Principal;
+                    self.agregar_reciente(&ruta_str);
                 }
                 Err(e) => self.nav.error = Some(e),
             },
@@ -536,6 +593,7 @@ impl App {
                     self.info_gcode = Some(info);
                     self.nav.error = None;
                     self.pantalla = PantallaActiva::Principal;
+                    self.agregar_reciente(&ruta_str);
                 }
                 Err(e) => self.nav.error = Some(e),
             },
@@ -604,11 +662,12 @@ fn render(f: &mut Frame, app: &App) {
     render_statusbar(f, app, main[3]);
 
     match &app.pantalla {
-        PantallaActiva::Historial => render_popup_historial(f, app, size),
-        PantallaActiva::Ayuda     => render_popup_ayuda(f, size),
-        PantallaActiva::Archivos  => render_popup_archivos(f, app, size),
-        PantallaActiva::Vista3D   => render_popup_3d(f, app, size),
-        PantallaActiva::Principal => {}
+        PantallaActiva::Historial  => render_popup_historial(f, app, size),
+        PantallaActiva::Ayuda      => render_popup_ayuda(f, size),
+        PantallaActiva::Archivos   => render_popup_archivos(f, app, size),
+        PantallaActiva::Vista3D    => render_popup_3d(f, app, size),
+        PantallaActiva::Recientes  => render_popup_recientes(f, app, size),
+        PantallaActiva::Principal  => {}
     }
 
     // Modal de confirmación de salida (siempre encima de todo)
@@ -656,13 +715,13 @@ fn render_titulo(f: &mut Frame, area: Rect) {
     let lineas = vec![
         Line::from(Span::styled(franja, st(CELESTE))),
         Line::from(vec![
-            Span::styled("  ☀  ", st_bold(ORO)),
-            Span::styled("CALCULADORA PLA 3D", st_bold(BLANCO)),
-            Span::styled("   —   República Argentina", st(CELESTE)),
+            Span::styled("  🦅 ", st_bold(ORO)),
+            Span::styled("CondorLab", st_bold(BLANCO)),
+            Span::styled("  —  Calculadora de Impresión 3D", st(CELESTE)),
             Span::styled("   v0.2", st(GRIS)),
         ]),
         Line::from(vec![
-            Span::styled("       Flashforge Adventurer 5M", st_italic(GRIS)),
+            Span::styled("       República Argentina", st_italic(CELESTE)),
         ]),
     ];
 
@@ -674,26 +733,26 @@ fn render_titulo(f: &mut Frame, area: Rect) {
 }
 
 fn render_statusbar(f: &mut Frame, app: &App, area: Rect) {
-    let perfil_nombre = config::PERFILES[app.perfil_idx].nombre;
+    let perfil_nombre   = config::PERFILES[app.perfil_idx].nombre;
+    let material_nombre = config::MATERIALES[app.material_idx].nombre;
     let msg = if app.guardado_msg.is_some() {
         Line::from(Span::styled("  ✔  Cotización guardada en el historial", st_bold(ORO)))
     } else {
-        let v_hint = if app.tris_norm.is_empty() {
-            Span::styled("v ", st(GRIS))
-        } else {
-            Span::styled("v ", st_bold(ORO))
-        };
+        let v_hint = if app.tris_norm.is_empty() { Span::styled("v ", st(GRIS)) }
+                     else                         { Span::styled("v ", st_bold(ORO)) };
+        let f_hint = if app.recientes.is_empty()  { Span::styled("f ", st(GRIS)) }
+                     else                          { Span::styled("f ", st_bold(ORO)) };
         Line::from(vec![
-            Span::styled(" Tab/↑↓ ", st_bold(ORO)), Span::styled("nav  ",      st(BLANCO)),
-            Span::styled("0-9/. ",   st_bold(ORO)), Span::styled("editar  ",   st(BLANCO)),
-            Span::styled("r ",       st_bold(ORO)), Span::styled("reset  ",    st(BLANCO)),
-            Span::styled("p ",       st_bold(ORO)), Span::styled(format!("perfil ({perfil_nombre})  "), st(BLANCO)),
+            Span::styled(" Tab/↑↓ ", st_bold(ORO)), Span::styled("nav  ",   st(BLANCO)),
+            Span::styled("r ",       st_bold(ORO)), Span::styled("reset  ", st(BLANCO)),
+            Span::styled("p ",       st_bold(ORO)), Span::styled(format!("{perfil_nombre}  "), st(BLANCO)),
+            Span::styled("m ",       st_bold(ORO)), Span::styled(format!("{material_nombre}  "), st(BLANCO)),
             Span::styled("a ",       st_bold(ORO)), Span::styled("explorar  ", st(BLANCO)),
-            v_hint,                                  Span::styled("vista 3D  ", st(BLANCO)),
-            Span::styled("s ",       st_bold(ORO)), Span::styled("guardar  ",  st(BLANCO)),
+            f_hint,                                  Span::styled("recientes  ", st(BLANCO)),
+            v_hint,                                  Span::styled("3D  ",     st(BLANCO)),
+            Span::styled("s ",       st_bold(ORO)), Span::styled("guardar  ",st(BLANCO)),
             Span::styled("h ",       st_bold(ORO)), Span::styled("historial  ",st(BLANCO)),
-            Span::styled("? ",       st_bold(ORO)), Span::styled("ayuda  ",    st(BLANCO)),
-            Span::styled("q ",       st_bold(ORO)), Span::styled("salir",      st(BLANCO)),
+            Span::styled("q ",       st_bold(ORO)), Span::styled("salir",    st(BLANCO)),
         ])
     };
     f.render_widget(
@@ -878,7 +937,7 @@ fn render_panel_precio(f: &mut Frame, _app: &App, calc: &Calc, area: Rect) {
 }
 
 fn render_popup_historial(f: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect(70, 60, area);
+    let popup = centered_rect(72, 75, area);
     f.render_widget(Clear, popup);
 
     let bloque = Block::default()
@@ -892,29 +951,131 @@ fn render_popup_historial(f: &mut Frame, app: &App, area: Rect) {
     let inner = bloque.inner(popup);
     f.render_widget(bloque, popup);
 
-    let mut lineas: Vec<Line> = vec![Line::from("")];
+    let mut lineas: Vec<Line> = vec![];
 
     if app.historial.is_empty() {
+        lineas.push(Line::from(""));
         lineas.push(Line::from(Span::styled(
             "  Sin cotizaciones guardadas. Presioná [s] para guardar la actual.",
             st_italic(GRIS),
         )));
     } else {
+        // ── Estadísticas ─────────────────────────────────────────────────────
+        let n       = app.historial.len();
+        let total   = app.historial.iter().map(|c| c.precio).sum::<f64>();
+        let promedio = total / n as f64;
+        let min_p   = app.historial.iter().map(|c| c.precio).fold(f64::MAX, f64::min);
+        let max_p   = app.historial.iter().map(|c| c.precio).fold(f64::MIN, f64::max);
+        let t_g     = app.historial.iter().map(|c| c.gramos).sum::<f64>();
+        let t_h     = app.historial.iter().map(|c| c.horas).sum::<f64>();
+
         lineas.push(Line::from(vec![
-            Span::styled(format!("  {:<20}", "Descripción"), st_bold(CELESTE)),
-            Span::styled(format!("{:>14}", "Costo base"),    st_bold(CELESTE)),
+            Span::styled("  Cotizaciones: ", st(GRIS)),
+            Span::styled(format!("{n}"), st_bold(BLANCO)),
+            Span::styled("   Total: ",    st(GRIS)),
+            Span::styled(format!("${total:.0}"), st_bold(ORO)),
+            Span::styled("   Prom: ",     st(GRIS)),
+            Span::styled(format!("${promedio:.0}"), st(ORO)),
+            Span::styled("   Rango: ",    st(GRIS)),
+            Span::styled(format!("${min_p:.0}"), st(CELESTE)),
+            Span::styled(" – ", st(GRIS)),
+            Span::styled(format!("${max_p:.0}"), st(CELESTE)),
+        ]));
+        lineas.push(Line::from(vec![
+            Span::styled("  Material total: ", st(GRIS)),
+            Span::styled(format!("{t_g:.0}g"), st_bold(BLANCO)),
+            Span::styled("   Tiempo total: ", st(GRIS)),
+            Span::styled(format!("{t_h:.1}h"), st_bold(BLANCO)),
+        ]));
+        lineas.push(Line::from(Span::styled(
+            format!("  {}", "─".repeat(60)), st(GRIS),
+        )));
+
+        // ── Lista ─────────────────────────────────────────────────────────────
+        lineas.push(Line::from(vec![
+            Span::styled(format!("  {:<22}", "Descripción"), st_bold(CELESTE)),
+            Span::styled(format!("{:>12}", "Costo base"),    st_bold(CELESTE)),
             Span::styled(format!("{:>14}", "Precio ARS"),    st_bold(ORO)),
             Span::styled(format!("{:>10}", "USD"),           st_bold(VERDE_USD)),
         ]));
         lineas.push(Line::from(Span::styled(
-            format!("  {}", "─".repeat(56)), st(GRIS),
+            format!("  {}", "─".repeat(60)), st(GRIS),
         )));
         for cot in &app.historial {
             lineas.push(Line::from(vec![
-                Span::styled(format!("  {:<20}", cot.label),      st(BLANCO)),
-                Span::styled(format!("{:>14.0}", cot.costo_base), st(GRIS)),
-                Span::styled(format!("{:>14.0}", cot.precio),      st_bold(ORO)),
-                Span::styled(format!("{:>10.2}", cot.precio_usd),  st(VERDE_USD)),
+                Span::styled(format!("  {:<22}", cot.label),      st(BLANCO)),
+                Span::styled(format!("{:>12.0}", cot.costo_base), st(GRIS)),
+                Span::styled(format!("{:>14.0}", cot.precio),     st_bold(ORO)),
+                Span::styled(format!("{:>10.2}", cot.precio_usd), st(VERDE_USD)),
+            ]));
+        }
+    }
+
+    f.render_widget(Paragraph::new(lineas), inner);
+}
+
+fn render_popup_recientes(f: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(62, 55, area);
+    f.render_widget(Clear, popup);
+
+    let bloque = Block::default()
+        .borders(Borders::ALL)
+        .border_style(st(CELESTE))
+        .title(Span::styled(
+            " ☀  ARCHIVOS RECIENTES  —  ↑↓ navegar  Enter abrir  q cerrar ",
+            st_bold(CELESTE),
+        ));
+
+    let inner = bloque.inner(popup);
+    f.render_widget(bloque, popup);
+
+    let mut lineas: Vec<Line> = vec![Line::from("")];
+
+    if app.recientes.is_empty() {
+        lineas.push(Line::from(Span::styled(
+            "  Sin archivos recientes. Abrí un STL o G-code con [a].",
+            st_italic(GRIS),
+        )));
+    } else {
+        for (i, ruta) in app.recientes.iter().enumerate() {
+            let path = std::path::Path::new(ruta);
+            let nombre = path.file_name()
+                .unwrap_or_default().to_string_lossy().to_string();
+            let dir = path.parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let ext = path.extension()
+                .unwrap_or_default().to_string_lossy().to_lowercase();
+
+            let (tipo_str, tipo_color) = match ext.as_str() {
+                "stl"             => (" STL  ", ORO),
+                "gcode"|"gco"|"g" => ("GCODE ", VERDE_USD),
+                _                 => (" FILE ", GRIS),
+            };
+
+            let seleccionado = i == app.sel_reciente;
+            let bg = if seleccionado { Color::Rgb(30, 50, 90) } else { Color::Reset };
+            let fg_nombre = if seleccionado { BLANCO } else { Color::Rgb(180, 200, 220) };
+
+            let dir_truncado = if dir.len() > 35 {
+                format!("…{}", &dir[dir.len().saturating_sub(34)..])
+            } else { dir.clone() };
+
+            lineas.push(Line::from(vec![
+                Span::styled(
+                    format!("  {tipo_str} "),
+                    Style::default().fg(tipo_color).bg(bg),
+                ),
+                Span::styled(
+                    format!("{nombre:<28}"),
+                    Style::default().fg(fg_nombre).bg(bg).add_modifier(
+                        if seleccionado { Modifier::BOLD } else { Modifier::empty() }
+                    ),
+                ),
+                Span::styled(
+                    format!(" {dir_truncado}"),
+                    Style::default().fg(GRIS).bg(bg),
+                ),
             ]));
         }
     }
