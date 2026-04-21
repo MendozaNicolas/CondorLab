@@ -27,15 +27,17 @@ pub struct PerfilImpresora {
     pub costo_ars: f64,
     pub vida_hs:   f64,
     pub mant_hr:   f64,
+    pub cama_x:    f32,  // mm
+    pub cama_y:    f32,  // mm
 }
 
 pub const PERFILES: &[PerfilImpresora] = &[
-    PerfilImpresora { nombre: "Flashforge Adventurer 5M", watts: 220.0, costo_ars: 585_900.0, vida_hs: 3000.0, mant_hr: 300.0 },
-    PerfilImpresora { nombre: "Creality Ender 3 V2",      watts: 180.0, costo_ars: 180_000.0, vida_hs: 2000.0, mant_hr: 200.0 },
-    PerfilImpresora { nombre: "Prusa MK4",                watts: 200.0, costo_ars: 850_000.0, vida_hs: 5000.0, mant_hr: 250.0 },
-    PerfilImpresora { nombre: "Bambu Lab A1 Mini",        watts: 170.0, costo_ars: 450_000.0, vida_hs: 3000.0, mant_hr: 250.0 },
-    PerfilImpresora { nombre: "Creality K1",              watts: 350.0, costo_ars: 320_000.0, vida_hs: 2500.0, mant_hr: 220.0 },
-    PerfilImpresora { nombre: "Personalizada",            watts:   0.0, costo_ars:       0.0, vida_hs:    0.0, mant_hr:   0.0 },
+    PerfilImpresora { nombre: "Flashforge Adventurer 5M", watts: 220.0, costo_ars: 585_900.0, vida_hs: 3000.0, mant_hr: 300.0, cama_x: 220.0, cama_y: 220.0 },
+    PerfilImpresora { nombre: "Creality Ender 3 V2",      watts: 180.0, costo_ars: 180_000.0, vida_hs: 2000.0, mant_hr: 200.0, cama_x: 220.0, cama_y: 220.0 },
+    PerfilImpresora { nombre: "Prusa MK4",                watts: 200.0, costo_ars: 850_000.0, vida_hs: 5000.0, mant_hr: 250.0, cama_x: 250.0, cama_y: 210.0 },
+    PerfilImpresora { nombre: "Bambu Lab A1 Mini",        watts: 170.0, costo_ars: 450_000.0, vida_hs: 3000.0, mant_hr: 250.0, cama_x: 180.0, cama_y: 180.0 },
+    PerfilImpresora { nombre: "Creality K1",              watts: 350.0, costo_ars: 320_000.0, vida_hs: 2500.0, mant_hr: 220.0, cama_x: 220.0, cama_y: 220.0 },
+    PerfilImpresora { nombre: "Personalizada",            watts:   0.0, costo_ars:       0.0, vida_hs:    0.0, mant_hr:   0.0, cama_x: 200.0, cama_y: 200.0 },
 ];
 
 // ──────────────────────────────────────────────────────────────────────────────

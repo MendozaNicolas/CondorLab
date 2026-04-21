@@ -44,6 +44,8 @@ pub struct SlicerConfig {
     pub infill_densidad: f32,
     /// Distancia de retracción en mm (0 = sin retracción)
     pub retraccion_mm: f32,
+    /// Capas sólidas top y bottom (típico: 3-4)
+    pub capas_solidas: u32,
 }
 
 impl Default for SlicerConfig {
@@ -60,6 +62,7 @@ impl Default for SlicerConfig {
             nombre_archivo:      "output".to_string(),
             infill_densidad:     20.0,
             retraccion_mm:       0.8,
+            capas_solidas:       3,
         }
     }
 }
@@ -139,14 +142,19 @@ pub fn slicear(tris: &[[[f32; 3]; 3]], config: &SlicerConfig) -> ResultadoSlicin
             .map(|c| perimeter::generar_shells(c, config.n_perimetros, config.diametro_boquilla))
             .collect();
 
+        // Las capas top y bottom usan infill sólido (espaciado = diámetro boquilla)
+        let n_sol         = config.capas_solidas as usize;
+        let es_solida     = i < n_sol || i >= num_capas.saturating_sub(n_sol);
+        let espaciado_capa = if es_solida { config.diametro_boquilla } else { espaciado_inf };
+
         // Infill: ángulo alternado 45° / -45° entre capas consecutivas
         let angulo_inf = if i % 2 == 0 { 45.0f32 } else { -45.0f32 };
-        let infill_capa: Vec<Vec<[[f32; 2]; 2]>> = if infill_activo {
+        let infill_capa: Vec<Vec<[[f32; 2]; 2]>> = if infill_activo || es_solida {
             perimetros.iter().map(|shells| {
                 // El shell más interior define el área de relleno
                 let base = shells.last().or_else(|| shells.first());
                 match base {
-                    Some(c) if c.len() >= 3 => infill::generar_infill(c, espaciado_inf, angulo_inf),
+                    Some(c) if c.len() >= 3 => infill::generar_infill(c, espaciado_capa, angulo_inf),
                     _ => Vec::new(),
                 }
             }).collect()
