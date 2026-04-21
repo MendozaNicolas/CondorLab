@@ -1,6 +1,7 @@
 mod archivo;
 mod config;
 mod wireframe;
+pub mod slicer;
 
 use std::{io, path::{Path, PathBuf}, fs, time::Duration};
 use crossterm::{
@@ -25,7 +26,7 @@ use config::Cotizacion;
 
 #[derive(Clone, Debug)]
 struct Campo {
-    label: &'static str,
+    label: String,
     unidad: &'static str,
     hint: &'static str,
     default: f64,
@@ -34,7 +35,7 @@ struct Campo {
 
 impl Campo {
     fn new(label: &'static str, unidad: &'static str, hint: &'static str, default: f64) -> Self {
-        Self { label, unidad, hint, default, valor: String::new() }
+        Self { label: label.to_string(), unidad, hint, default, valor: String::new() }
     }
 
     fn parsed(&self) -> f64 {
@@ -357,6 +358,10 @@ impl App {
             if i < NUM_CAMPOS { app.campos[i].valor = v.clone(); }
         }
 
+        // Sincronizar el label del precio con el material guardado
+        let m = &config::MATERIALES[material_idx];
+        app.campos[F_PRECIO_KG].label = format!("Precio {} ($/kg)", m.nombre);
+
         app
     }
 
@@ -370,9 +375,11 @@ impl App {
 
     fn aplicar_material(&mut self) {
         let m = &config::MATERIALES[self.material_idx];
+        self.campos[F_PRECIO_KG].label = format!("Precio {} ($/kg)", m.nombre);
         self.campos[F_PRECIO_KG].valor = format!("{:.0}", m.precio_ref_kg);
-        if let Some(ref stl) = self.info_stl {
-            self.campos[F_GRAMOS].valor = format!("{:.1}", stl.volumen_cm3 * m.densidad);
+        if let Some(ref mut stl) = self.info_stl {
+            stl.gramos = stl.volumen_cm3 * m.densidad;
+            self.campos[F_GRAMOS].valor = format!("{:.1}", stl.gramos);
         }
     }
 
@@ -568,9 +575,10 @@ impl App {
 
         match ext.as_str() {
             "stl" => match archivo::cargar_stl(&ruta_str) {
-                Ok(info) => {
+                Ok(mut info) => {
                     let densidad = config::MATERIALES[self.material_idx].densidad;
-                    self.campos[F_GRAMOS].valor = format!("{:.1}", info.volumen_cm3 * densidad);
+                    info.gramos = info.volumen_cm3 * densidad;
+                    self.campos[F_GRAMOS].valor = format!("{:.1}", info.gramos);
                     self.tris_norm = wireframe::normalizar(&info.tris);
                     self.normals_suaves = wireframe::calcular_normales_suaves(&self.tris_norm);
                     self.rot_x = -0.4; self.rot_y = 0.6; self.rot_z = 0.0;
@@ -1166,7 +1174,7 @@ fn render_panel_archivo(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("  STL   ", st_bold(ORO)),
             Span::styled(stl.nombre.clone(), st(BLANCO)),
             Span::styled(format!("   {:.2} cm³", stl.volumen_cm3), st(CELESTE)),
-            Span::styled(format!("   {:.1} g", stl.gramos_pla), st_bold(ORO)),
+            Span::styled(format!("   {:.1} g", stl.gramos), st_bold(ORO)),
             Span::styled(
                 format!("   {}×{}×{} mm",
                     stl.dim_mm[0] as u32, stl.dim_mm[1] as u32, stl.dim_mm[2] as u32),
@@ -1357,7 +1365,7 @@ fn render_popup_3d(f: &mut Frame, app: &App, area: Rect) {
     let titulo = if let Some(stl) = &app.info_stl {
         format!(
             " ☀  {}  ·  {:.1}g  ·  {:.2}cm³  ─  ←→↑↓ XY  j/k Z  +/- zoom  c color  w wire  r reset ",
-            stl.nombre, stl.gramos_pla, stl.volumen_cm3
+            stl.nombre, stl.gramos, stl.volumen_cm3
         )
     } else {
         " ☀  VISTA 3D  ─  ←→↑↓ XY  j/k Z  +/- zoom  c color  w wire  r reset ".to_string()

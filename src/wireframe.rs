@@ -227,19 +227,23 @@ pub fn renderizar(
             rasterizar_tri(fb, s0, s1, s2, bv);
         }
 
-        // Contorno/silueta
-        let snap = fb.brillo.clone();
+        // Contorno/silueta — dos pasadas: primero detectar, luego marcar.
+        // Evita clonar el buffer y garantiza que la detección usa los valores originales.
+        let mut edge_pixels: Vec<usize> = Vec::new();
         for y in 0..fb.ph {
             for x in 0..fb.pw {
                 let idx = y * fb.pw + x;
-                if snap[idx] < 0.0 { continue; }
+                if fb.brillo[idx] < 0.0 { continue; }
                 let vecino_fondo =
-                    (x == 0         || snap[idx - 1]     < 0.0) ||
-                    (x == fb.pw - 1 || snap[idx + 1]     < 0.0) ||
-                    (y == 0         || snap[idx - fb.pw] < 0.0) ||
-                    (y == fb.ph - 1 || snap[idx + fb.pw] < 0.0);
-                if vecino_fondo { fb.brillo[idx] = 2.0; }
+                    (x == 0         || fb.brillo[idx - 1]     < 0.0) ||
+                    (x == fb.pw - 1 || fb.brillo[idx + 1]     < 0.0) ||
+                    (y == 0         || fb.brillo[idx - fb.pw] < 0.0) ||
+                    (y == fb.ph - 1 || fb.brillo[idx + fb.pw] < 0.0);
+                if vecino_fondo { edge_pixels.push(idx); }
             }
+        }
+        for idx in edge_pixels {
+            fb.brillo[idx] = 2.0;
         }
     }
 

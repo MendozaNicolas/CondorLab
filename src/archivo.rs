@@ -8,7 +8,7 @@ pub struct InfoSTL {
     pub nombre: String,
     pub triangulos: usize,
     pub volumen_cm3: f64,
-    pub gramos_pla: f64,           // con densidad PLA 1.24 g/cm³
+    pub gramos: f64,               // calculado con la densidad del material seleccionado
     pub dim_mm: [f32; 3],          // [ancho, profundidad, alto]
     pub tris: Vec<[[f32; 3]; 3]>,  // triángulos crudos para wireframe
 }
@@ -76,14 +76,13 @@ pub fn cargar_stl(ruta: &str) -> Result<InfoSTL, String> {
     }
 
     let volumen_cm3 = vol.abs() / 1000.0; // mm³ → cm³
-    let gramos_pla  = volumen_cm3 * 1.24;  // densidad PLA estándar
     let dim_mm      = [max[0]-min[0], max[1]-min[1], max[2]-min[2]];
 
     Ok(InfoSTL {
         nombre,
         triangulos: mesh.faces.len(),
         volumen_cm3,
-        gramos_pla,
+        gramos: volumen_cm3 * 1.24, // valor inicial con PLA; se sobreescribe en main.rs con la densidad real
         dim_mm,
         tris,
     })
@@ -113,8 +112,19 @@ pub fn cargar_gcode(ruta: &str) -> Result<InfoGcode, String> {
     let mut altura_capa   = 0.0f64;
     let mut relleno_pct   = 0.0f64;
 
-    // Sólo leemos el header (primeras 300 líneas) para ser rápidos
-    for line in contenido.lines().take(300) {
+    // Escaneamos header (primeras 300) + footer (últimas 100):
+    // PrusaSlicer/OrcaSlicer escriben tiempo y filamento al FINAL del archivo.
+    let all_lines: Vec<&str> = contenido.lines().collect();
+    let total = all_lines.len();
+    let tail_start = if total > 300 { total.saturating_sub(100) } else { total };
+    let lines_to_scan: Vec<&str> = all_lines[..300.min(total)]
+        .iter()
+        .chain(all_lines[tail_start..].iter())
+        .copied()
+        .collect();
+
+    for line in &lines_to_scan {
+        let line = *line;
         let l = line.trim();
 
         // ── Detección de slicer ──────────────────────────────────────────
