@@ -50,14 +50,22 @@ src/
 - Soportes automáticos
 - Primera capa especial (más lenta, más pegada)
 - Retracción / unretracción entre viajes
-- Interfaz TUI para configurar y disparar el slicer (solo existe como módulo Rust)
 - Detección de islas flotantes / overhangs
+
+## TUI del slicer (integrada en v0.2)
+
+- Tecla `x` abre el popup del slicer (requiere STL cargado)
+- Panel izquierdo: 8 campos editables (altura de capa, boquilla, filamento, perímetros, velocidades, temps)
+- Panel derecho: resultado (capas, filamento estimado, tiempo, lista de capas)
+- `Enter` ejecuta el slicer; `g` guarda el .gcode junto al STL; `Esc` cierra
+- Las temps del hotend/cama se sincronizan automáticamente al cambiar material (`m`)
+- `App` tiene: `slicer_campos[8]`, `slicer_foco`, `slicer_resultado`, `slicer_estado`, `ruta_stl`
 
 ## Próximos pasos recomendados
 
 1. **Infill rectilinear** — líneas de relleno dentro del contorno interior. Requiere intersectar líneas paralelas con el contorno más interno de cada isla.
-2. **Integración TUI** — nueva pantalla `PantallaActiva::Slicer` con `SlicerConfig` editable y tecla para ejecutar + guardar `.gcode`.
-3. **Primera capa** — velocidad reducida (50% de velocidad_impresion) y altura ligeramente mayor para adhesión.
+2. **Primera capa** — velocidad reducida (50% de velocidad_impresion) y altura ligeramente mayor para adhesión.
+3. **Retracción** — `G1 E-N F2700` antes de cada viaje y `G1 E+N` al reanudar.
 
 ## Bugs conocidos / limitaciones
 

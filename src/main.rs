@@ -86,6 +86,17 @@ const F_MARGEN: usize = 13;
 const F_DOLAR: usize = 14;
 const NUM_CAMPOS: usize = 15;
 
+// Índices de campos del slicer
+const SC_ALTURA_CAPA: usize = 0;
+const SC_BOQUILLA:    usize = 1;
+const SC_FILAMENTO:   usize = 2;
+const SC_PERIMETROS:  usize = 3;
+const SC_VEL_IMP:     usize = 4;
+const SC_VEL_VIAJE:   usize = 5;
+const SC_TEMP_HOTEND: usize = 6;
+const SC_TEMP_CAMA:   usize = 7;
+const NUM_SLICER_CAMPOS: usize = 8;
+
 #[derive(Default)]
 struct Calc {
     gramos_reales: f64,
@@ -146,7 +157,7 @@ fn calcular(campos: &[Campo; NUM_CAMPOS]) -> Calc {
 // APP STATE
 // ──────────────────────────────────────────────────────────────────────────────
 
-enum PantallaActiva { Principal, Historial, Ayuda, Archivos, Vista3D, Recientes }
+enum PantallaActiva { Principal, Historial, Ayuda, Archivos, Vista3D, Recientes, Slicer }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // EXPLORADOR DE ARCHIVOS
@@ -300,6 +311,12 @@ struct App {
     confirmar_salida: bool,
     // explorador de archivos
     nav: NavArchivos,
+    // slicer
+    slicer_campos:    [Campo; NUM_SLICER_CAMPOS],
+    slicer_foco:      usize,
+    slicer_resultado: Option<slicer::ResultadoSlicing>,
+    slicer_estado:    Option<String>,
+    ruta_stl:         Option<String>,
 }
 
 impl App {
@@ -351,6 +368,20 @@ impl App {
             nav: NavArchivos::nuevo(
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
             ),
+            slicer_campos: [
+                Campo::new("Altura de capa",       "mm",   "Altura de cada capa en mm. Recomendado: 0.2", 0.2),
+                Campo::new("Diám. boquilla",        "mm",   "Diámetro de la boquilla. Standard: 0.4", 0.4),
+                Campo::new("Diám. filamento",       "mm",   "1.75 mm (estándar) o 2.85 mm", 1.75),
+                Campo::new("Perímetros",            "",     "Cantidad de shells de perímetro (1-4 recomendado)", 2.0),
+                Campo::new("Vel. impresión",        "mm/s", "Velocidad de impresión en mm/s", 50.0),
+                Campo::new("Vel. viaje",            "mm/s", "Velocidad de viaje (sin extrusión) en mm/s", 150.0),
+                Campo::new("Temp. hotend",          "°C",   "Temperatura del hotend", 200.0),
+                Campo::new("Temp. cama",            "°C",   "Temperatura de la cama caliente", 60.0),
+            ],
+            slicer_foco:      0,
+            slicer_resultado: None,
+            slicer_estado:    None,
+            ruta_stl:         None,
         };
 
         // Restaurar valores guardados de los campos
@@ -358,9 +389,11 @@ impl App {
             if i < NUM_CAMPOS { app.campos[i].valor = v.clone(); }
         }
 
-        // Sincronizar el label del precio con el material guardado
+        // Sincronizar el label del precio y temps del slicer con el material guardado
         let m = &config::MATERIALES[material_idx];
         app.campos[F_PRECIO_KG].label = format!("Precio {} ($/kg)", m.nombre);
+        app.slicer_campos[SC_TEMP_HOTEND].valor = format!("{}", m.temp_hotend);
+        app.slicer_campos[SC_TEMP_CAMA].valor   = format!("{}", m.temp_cama);
 
         app
     }
@@ -377,6 +410,8 @@ impl App {
         let m = &config::MATERIALES[self.material_idx];
         self.campos[F_PRECIO_KG].label = format!("Precio {} ($/kg)", m.nombre);
         self.campos[F_PRECIO_KG].valor = format!("{:.0}", m.precio_ref_kg);
+        self.slicer_campos[SC_TEMP_HOTEND].valor = format!("{}", m.temp_hotend);
+        self.slicer_campos[SC_TEMP_CAMA].valor   = format!("{}", m.temp_cama);
         if let Some(ref mut stl) = self.info_stl {
             stl.gramos = stl.volumen_cm3 * m.densidad;
             self.campos[F_GRAMOS].valor = format!("{:.1}", stl.gramos);
@@ -414,6 +449,58 @@ impl App {
         });
         self.guardado_msg = Some(30);
         config::guardar_historial(&self.historial);
+    }
+
+    fn slicer_config(&self) -> slicer::SlicerConfig {
+        let nombre = self.ruta_stl.as_deref()
+            .and_then(|r| std::path::Path::new(r).file_stem())
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "output".to_string());
+        slicer::SlicerConfig {
+            altura_capa:         self.slicer_campos[SC_ALTURA_CAPA].parsed() as f32,
+            diametro_boquilla:   self.slicer_campos[SC_BOQUILLA].parsed()    as f32,
+            diametro_filamento:  self.slicer_campos[SC_FILAMENTO].parsed()   as f32,
+            n_perimetros:        self.slicer_campos[SC_PERIMETROS].parsed()  as u32,
+            velocidad_impresion: self.slicer_campos[SC_VEL_IMP].parsed()     as f32,
+            velocidad_viaje:     self.slicer_campos[SC_VEL_VIAJE].parsed()   as f32,
+            temp_hotend:         self.slicer_campos[SC_TEMP_HOTEND].parsed() as u32,
+            temp_cama:           self.slicer_campos[SC_TEMP_CAMA].parsed()   as u32,
+            nombre_archivo:      nombre,
+        }
+    }
+
+    fn ejecutar_slicer(&mut self) {
+        let tris = match &self.info_stl {
+            Some(stl) => stl.tris.clone(),
+            None => { self.slicer_estado = Some("No hay STL cargado.".into()); return; }
+        };
+        self.slicer_estado = Some("Sliceando…".into());
+        let config = self.slicer_config();
+        let resultado = slicer::slicear(&tris, &config);
+        let h = resultado.tiempo_min as u32 / 60;
+        let m = resultado.tiempo_min as u32 % 60;
+        self.slicer_estado = Some(format!(
+            "{} capas  ·  {:.1} mm filamento  ·  {}h {:02}m estimados",
+            resultado.capas.len(), resultado.filamento_mm, h, m,
+        ));
+        self.slicer_resultado = Some(resultado);
+    }
+
+    fn guardar_gcode(&mut self) {
+        let (resultado, ruta) = match (&self.slicer_resultado, &self.ruta_stl) {
+            (Some(r), Some(p)) => (r.clone(), p.clone()),
+            _ => { self.slicer_estado = Some("Primero sliceá el modelo (Enter).".into()); return; }
+        };
+        let config = self.slicer_config();
+        let gcode = slicer::generar_gcode(&resultado, &config);
+        let ruta_path = std::path::Path::new(&ruta);
+        let stem = ruta_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let dir = ruta_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let out_path = dir.join(format!("{}.gcode", stem));
+        match fs::write(&out_path, &gcode) {
+            Ok(_)  => self.slicer_estado = Some(format!("Guardado: {}", out_path.to_string_lossy())),
+            Err(e) => self.slicer_estado = Some(format!("Error: {e}")),
+        }
     }
 
     fn handle_key(&mut self, key: event::KeyEvent) {
@@ -511,6 +598,34 @@ impl App {
                 }
                 return;
             }
+            PantallaActiva::Slicer => {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => self.pantalla = PantallaActiva::Principal,
+                    KeyCode::Tab | KeyCode::Down => {
+                        self.slicer_foco = (self.slicer_foco + 1) % NUM_SLICER_CAMPOS;
+                    }
+                    KeyCode::BackTab | KeyCode::Up => {
+                        self.slicer_foco = (self.slicer_foco + NUM_SLICER_CAMPOS - 1) % NUM_SLICER_CAMPOS;
+                    }
+                    KeyCode::Enter => self.ejecutar_slicer(),
+                    KeyCode::Char('g') => self.guardar_gcode(),
+                    KeyCode::Char('r') => {
+                        self.slicer_campos[self.slicer_foco].valor.clear();
+                    }
+                    KeyCode::Char(c) if c.is_ascii_digit() || c == '.' || c == ',' => {
+                        let f = &mut self.slicer_campos[self.slicer_foco];
+                        if (c == '.' || c == ',') && (f.valor.contains('.') || f.valor.contains(',')) {
+                            return;
+                        }
+                        f.valor.push(c);
+                    }
+                    KeyCode::Backspace => {
+                        self.slicer_campos[self.slicer_foco].valor.pop();
+                    }
+                    _ => {}
+                }
+                return;
+            }
             PantallaActiva::Principal => {}
         }
 
@@ -549,6 +664,9 @@ impl App {
             (KeyCode::Char('v'), _) if !self.tris_norm.is_empty() => {
                 self.pantalla = PantallaActiva::Vista3D;
             }
+            (KeyCode::Char('x'), _) if self.info_stl.is_some() => {
+                self.pantalla = PantallaActiva::Slicer;
+            }
             (KeyCode::Char('r'), _) => {
                 self.campos[self.foco].valor.clear();
             }
@@ -583,6 +701,9 @@ impl App {
                     self.normals_suaves = wireframe::calcular_normales_suaves(&self.tris_norm);
                     self.rot_x = -0.4; self.rot_y = 0.6; self.rot_z = 0.0;
                     self.zoom_3d = 0.0; self.auto_rotar = true;
+                    self.ruta_stl = Some(ruta_str.clone());
+                    self.slicer_resultado = None;
+                    self.slicer_estado = None;
                     self.info_stl = Some(info);
                     self.nav.error = None;
                     self.pantalla = PantallaActiva::Principal;
@@ -675,6 +796,7 @@ fn render(f: &mut Frame, app: &App) {
         PantallaActiva::Archivos   => render_popup_archivos(f, app, size),
         PantallaActiva::Vista3D    => render_popup_3d(f, app, size),
         PantallaActiva::Recientes  => render_popup_recientes(f, app, size),
+        PantallaActiva::Slicer     => render_popup_slicer(f, app, size),
         PantallaActiva::Principal  => {}
     }
 
@@ -750,6 +872,8 @@ fn render_statusbar(f: &mut Frame, app: &App, area: Rect) {
                      else                         { Span::styled("v ", st_bold(ORO)) };
         let f_hint = if app.recientes.is_empty()  { Span::styled("f ", st(GRIS)) }
                      else                          { Span::styled("f ", st_bold(ORO)) };
+        let x_hint = if app.info_stl.is_none()    { Span::styled("x ", st(GRIS)) }
+                     else                          { Span::styled("x ", st_bold(ORO)) };
         Line::from(vec![
             Span::styled(" Tab/↑↓ ", st_bold(ORO)), Span::styled("nav  ",   st(BLANCO)),
             Span::styled("r ",       st_bold(ORO)), Span::styled("reset  ", st(BLANCO)),
@@ -758,6 +882,7 @@ fn render_statusbar(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("a ",       st_bold(ORO)), Span::styled("explorar  ", st(BLANCO)),
             f_hint,                                  Span::styled("recientes  ", st(BLANCO)),
             v_hint,                                  Span::styled("3D  ",     st(BLANCO)),
+            x_hint,                                  Span::styled("slicer  ", st(BLANCO)),
             Span::styled("s ",       st_bold(ORO)), Span::styled("guardar  ",st(BLANCO)),
             Span::styled("h ",       st_bold(ORO)), Span::styled("historial  ",st(BLANCO)),
             Span::styled("q ",       st_bold(ORO)), Span::styled("salir",    st(BLANCO)),
@@ -1433,6 +1558,165 @@ fn render_popup_3d(f: &mut Frame, app: &App, area: Rect) {
         ])
     };
     f.render_widget(Paragraph::new(vec![info_line]), info_area);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// POPUP: SLICER
+// ──────────────────────────────────────────────────────────────────────────────
+
+fn render_popup_slicer(f: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(84, 88, area);
+    f.render_widget(Clear, popup);
+
+    let nombre_stl = app.info_stl.as_ref()
+        .map(|s| s.nombre.clone())
+        .unwrap_or_else(|| "sin STL".to_string());
+
+    let bloque = Block::default()
+        .borders(Borders::ALL)
+        .border_style(st(ORO))
+        .title(Span::styled(
+            format!(" ☀  SLICER  —  {}  —  Enter slicear  g guardar gcode  Esc cerrar ", nombre_stl),
+            st_bold(ORO),
+        ));
+
+    let inner = bloque.inner(popup);
+    f.render_widget(bloque, popup);
+
+    // Layout: izq (config) | der (resultado)
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .split(inner);
+
+    render_slicer_config(f, app, cols[0]);
+    render_slicer_resultado(f, app, cols[1]);
+}
+
+fn render_slicer_config(f: &mut Frame, app: &App, area: Rect) {
+    let bloque = Block::default()
+        .borders(Borders::RIGHT)
+        .border_style(st(GRIS))
+        .title(Span::styled(" CONFIGURACIÓN ", st_bold(CELESTE)));
+
+    let inner = bloque.inner(area);
+    f.render_widget(bloque, area);
+
+    let mut lineas: Vec<Line> = vec![Line::from("")];
+
+    for (idx, campo) in app.slicer_campos.iter().enumerate() {
+        let activo = app.slicer_foco == idx;
+        let (prefix_sp, label_sp, val_sp, unit_sp) = if activo {
+            (
+                Span::styled(" ▶ ", st_bold(ORO)),
+                Span::styled(format!("{:<20}", campo.label), st_bold(BLANCO)),
+                Span::styled(
+                    format!("{}▌", campo.display()),
+                    Style::default().fg(AZUL).bg(CELESTE).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!(" {}", campo.unidad), st(CELESTE)),
+            )
+        } else {
+            (
+                Span::styled("   ", st(GRIS)),
+                Span::styled(format!("{:<20}", campo.label), st(BLANCO)),
+                Span::styled(campo.display(), st(CELESTE)),
+                Span::styled(format!(" {}", campo.unidad), st(GRIS)),
+            )
+        };
+        lineas.push(Line::from(vec![prefix_sp, label_sp, val_sp, unit_sp]));
+    }
+
+    lineas.push(Line::from(""));
+    lineas.push(Line::from(Span::styled(
+        format!(" ℹ  {}", app.slicer_campos[app.slicer_foco].hint),
+        st_italic(GRIS),
+    )));
+    lineas.push(Line::from(""));
+    lineas.push(Line::from(vec![
+        Span::styled(" Enter ", st_bold(ORO)),
+        Span::styled("Slicear", st(BLANCO)),
+    ]));
+    lineas.push(Line::from(vec![
+        Span::styled(" g     ", st_bold(ORO)),
+        Span::styled("Guardar G-code", st(BLANCO)),
+    ]));
+
+    f.render_widget(Paragraph::new(lineas), inner);
+}
+
+fn render_slicer_resultado(f: &mut Frame, app: &App, area: Rect) {
+    let bloque = Block::default()
+        .borders(Borders::NONE)
+        .title(Span::styled(" RESULTADO ", st_bold(CELESTE)));
+
+    let inner = bloque.inner(area);
+    f.render_widget(bloque, area);
+
+    let mut lineas: Vec<Line> = vec![Line::from("")];
+
+    // Estado / progreso
+    if let Some(ref estado) = app.slicer_estado {
+        let color = if estado.starts_with("Error") { Color::LightRed }
+                    else if estado.starts_with("Guardado") { Color::Green }
+                    else { ORO };
+        lineas.push(Line::from(Span::styled(format!(" {}", estado), st_bold(color))));
+        lineas.push(Line::from(""));
+    } else {
+        lineas.push(Line::from(Span::styled(
+            " Presioná Enter para slicear el modelo.",
+            st_italic(GRIS),
+        )));
+        lineas.push(Line::from(""));
+    }
+
+    if let Some(ref r) = app.slicer_resultado {
+        let h = r.tiempo_min as u32 / 60;
+        let m = r.tiempo_min as u32 % 60;
+
+        let radio   = app.slicer_campos[SC_FILAMENTO].parsed() / 2.0;
+        let vol_cm3 = r.filamento_mm * std::f64::consts::PI * radio * radio / 1000.0;
+        let gramos  = vol_cm3 * config::MATERIALES[app.material_idx].densidad;
+
+        lineas.push(Line::from(vec![
+            Span::styled(" Capas          ", st(GRIS)),
+            Span::styled(format!("{}", r.capas.len()), st_bold(BLANCO)),
+        ]));
+        lineas.push(Line::from(vec![
+            Span::styled(" Filamento      ", st(GRIS)),
+            Span::styled(format!("{:.1} mm", r.filamento_mm), st_bold(CELESTE)),
+        ]));
+        lineas.push(Line::from(vec![
+            Span::styled(" Material       ", st(GRIS)),
+            Span::styled(format!("{:.2} g", gramos), st_bold(ORO)),
+        ]));
+        lineas.push(Line::from(vec![
+            Span::styled(" Tiempo est.    ", st(GRIS)),
+            Span::styled(format!("{}h {:02}m", h, m), st_bold(BLANCO)),
+        ]));
+
+        if !r.capas.is_empty() {
+            lineas.push(Line::from(""));
+            lineas.push(Line::from(Span::styled(" ── Capas ─────────────────────────", st(GRIS))));
+            let max_mostrar = (inner.height as usize).saturating_sub(lineas.len() + 1);
+            for capa in r.capas.iter().take(max_mostrar) {
+                let n_islas  = capa.perimetros.len();
+                let n_shells: usize = capa.perimetros.iter().map(|i| i.len()).sum();
+                lineas.push(Line::from(vec![
+                    Span::styled(format!(" z={:.3}  ", capa.z), st(CELESTE)),
+                    Span::styled(format!("{} isla(s)  {} shell(s)", n_islas, n_shells), st(GRIS)),
+                ]));
+            }
+            if r.capas.len() > max_mostrar {
+                lineas.push(Line::from(Span::styled(
+                    format!(" … y {} capas más", r.capas.len() - max_mostrar),
+                    st_italic(GRIS),
+                )));
+            }
+        }
+    }
+
+    f.render_widget(Paragraph::new(lineas), inner);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
