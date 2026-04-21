@@ -10,6 +10,7 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 mod contour;
+mod infill;
 mod slice;
 pub mod gcode;
 pub mod perimeter;
@@ -39,6 +40,10 @@ pub struct SlicerConfig {
     pub temp_cama: u32,
     /// Nombre base para el comentario en el G-code
     pub nombre_archivo: String,
+    /// Densidad de relleno en % (0 = hueco, 100 = sólido)
+    pub infill_densidad: f32,
+    /// Distancia de retracción en mm (0 = sin retracción)
+    pub retraccion_mm: f32,
 }
 
 impl Default for SlicerConfig {
@@ -53,6 +58,8 @@ impl Default for SlicerConfig {
             temp_hotend:         200,
             temp_cama:           60,
             nombre_archivo:      "output".to_string(),
+            infill_densidad:     20.0,
+            retraccion_mm:       0.8,
         }
     }
 }
@@ -67,12 +74,16 @@ pub type Contorno = Vec<[f32; 2]>;
 /// `perimetros[i]` = shells de la isla i, de exterior a interior.
 /// `perimetros[i][0]` = contorno exterior de la isla.
 /// `perimetros[i][1]` = primer shell interior, etc.
+///
+/// `infill[i]` = segmentos de relleno de la isla i, orientados en serpentín.
 #[derive(Debug, Clone)]
 pub struct Capa {
     /// Altura Z en mm.
     pub z: f32,
     /// Shells de perímetro agrupados por isla.
     pub perimetros: Vec<Vec<Contorno>>,
+    /// Segmentos de infill por isla: cada `[[f32;2];2]` es (inicio, fin).
+    pub infill: Vec<Vec<[[f32; 2]; 2]>>,
 }
 
 /// Resultado completo del proceso de slicing.
@@ -87,7 +98,7 @@ pub struct ResultadoSlicing {
 
 // ── API pública ────────────────────────────────────────────────────────────────
 
-/// Slicea un mesh STL y devuelve las capas con sus shells de perímetro.
+/// Slicea un mesh STL y devuelve las capas con perímetros e infill.
 pub fn slicear(tris: &[[[f32; 3]; 3]], config: &SlicerConfig) -> ResultadoSlicing {
     if tris.is_empty() {
         return ResultadoSlicing { capas: Vec::new(), filamento_mm: 0.0, tiempo_min: 0.0 };
@@ -99,12 +110,21 @@ pub fn slicear(tris: &[[[f32; 3]; 3]], config: &SlicerConfig) -> ResultadoSlicin
     let h         = config.altura_capa;
     let num_capas = ((z_max - z_min) / h).ceil() as usize;
 
+    let infill_activo  = config.infill_densidad > 0.01;
+    // Espaciado entre líneas de infill: a mayor densidad, más juntas
+    let espaciado_inf  = if infill_activo {
+        (config.diametro_boquilla / (config.infill_densidad / 100.0))
+            .max(config.diametro_boquilla)
+    } else { 0.0 };
+
     let mut capas        = Vec::with_capacity(num_capas);
     let mut filamento_mm = 0.0f64;
     let mut tiempo_s     = 0.0f64;
 
     for i in 0..num_capas {
-        let z = (z_min + (i as f32 + 1.0) * h).min(z_max);
+        // Evitar z == z_max exacto: los triángulos del techo tienen d=0 y no
+        // se clasifican como "arriba", lo que produce cero contornos.
+        let z = (z_min + (i as f32 + 1.0) * h).min(z_max - h * 0.01);
 
         let segmentos = slice::cortar_capa(tris, z);
         let contornos = contour::construir_contornos(segmentos);
@@ -113,26 +133,49 @@ pub fn slicear(tris: &[[[f32; 3]; 3]], config: &SlicerConfig) -> ResultadoSlicin
             continue;
         }
 
-        // Generar shells de perímetro para cada isla
+        // Shells de perímetro por isla
         let perimetros: Vec<Vec<Contorno>> = contornos
             .iter()
             .map(|c| perimeter::generar_shells(c, config.n_perimetros, config.diametro_boquilla))
             .collect();
 
-        // Estimar filamento y tiempo usando solo el shell exterior de cada isla
-        for isla in &perimetros {
+        // Infill: ángulo alternado 45° / -45° entre capas consecutivas
+        let angulo_inf = if i % 2 == 0 { 45.0f32 } else { -45.0f32 };
+        let infill_capa: Vec<Vec<[[f32; 2]; 2]>> = if infill_activo {
+            perimetros.iter().map(|shells| {
+                // El shell más interior define el área de relleno
+                let base = shells.last().or_else(|| shells.first());
+                match base {
+                    Some(c) if c.len() >= 3 => infill::generar_infill(c, espaciado_inf, angulo_inf),
+                    _ => Vec::new(),
+                }
+            }).collect()
+        } else {
+            perimetros.iter().map(|_| Vec::new()).collect()
+        };
+
+        // Estimaciones de filamento y tiempo
+        for (idx, isla) in perimetros.iter().enumerate() {
             if let Some(exterior) = isla.first() {
-                let perim = perimetro_2d(exterior);
-                // Multiplicar por número de shells como aproximación del total
+                let perim  = perimetro_2d(exterior);
                 let factor = isla.len() as f64;
                 filamento_mm += calc_extrusion_mm(perim as f32, config) as f64 * factor;
                 tiempo_s     += (perim / config.velocidad_impresion as f64) * factor;
             }
+            // Sumar el filamento del infill
+            if let Some(segs) = infill_capa.get(idx) {
+                let dist_inf: f64 = segs.iter().map(|s| {
+                    let dx = (s[1][0] - s[0][0]) as f64;
+                    let dy = (s[1][1] - s[0][1]) as f64;
+                    (dx * dx + dy * dy).sqrt()
+                }).sum();
+                filamento_mm += calc_extrusion_mm(dist_inf as f32, config) as f64;
+                tiempo_s     += dist_inf / config.velocidad_impresion as f64;
+            }
         }
-        // Overhead por cambio de capa
-        tiempo_s += 2.0;
+        tiempo_s += 2.0; // overhead cambio de capa
 
-        capas.push(Capa { z, perimetros });
+        capas.push(Capa { z, perimetros, infill: infill_capa });
     }
 
     ResultadoSlicing {
@@ -205,11 +248,11 @@ pub(crate) mod tests {
 
     #[test]
     fn cubo_numero_de_capas_correcto() {
-        // Cubo 1mm alto, capa 0.2mm → 5 planos (z=0.2..1.0),
-        // pero z=1.0 no produce contornos (plano tangente al techo) → 4 capas.
+        // Cubo 1mm alto, capa 0.2mm → 5 planos. Con el epsilon z_max - 0.01*h,
+        // el último plano queda en ~0.998 (dentro del cubo) → 5 capas válidas.
         let config = SlicerConfig { altura_capa: 0.2, n_perimetros: 1, ..SlicerConfig::default() };
         let r = slicear(&cubo_unitario(), &config);
-        assert_eq!(r.capas.len(), 4, "Se esperaban 4 capas, se obtuvieron {}", r.capas.len());
+        assert_eq!(r.capas.len(), 5, "Se esperaban 5 capas, se obtuvieron {}", r.capas.len());
     }
 
     #[test]

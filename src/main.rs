@@ -95,7 +95,9 @@ const SC_VEL_IMP:     usize = 4;
 const SC_VEL_VIAJE:   usize = 5;
 const SC_TEMP_HOTEND: usize = 6;
 const SC_TEMP_CAMA:   usize = 7;
-const NUM_SLICER_CAMPOS: usize = 8;
+const SC_INFILL:      usize = 8;
+const SC_RETRACCION:  usize = 9;
+const NUM_SLICER_CAMPOS: usize = 10;
 
 #[derive(Default)]
 struct Calc {
@@ -309,6 +311,7 @@ struct App {
     paleta_3d:        u8,
     modo_wire:        u8,   // 0=sólido  1=wire  2=sólido+wire
     confirmar_salida: bool,
+    confirmar_opcion: bool,  // false = No (cancelar), true = Sí (salir)
     // explorador de archivos
     nav: NavArchivos,
     // slicer
@@ -365,6 +368,7 @@ impl App {
             paleta_3d: 0,
             modo_wire: 0,
             confirmar_salida: false,
+            confirmar_opcion: false,
             nav: NavArchivos::nuevo(
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
             ),
@@ -377,6 +381,8 @@ impl App {
                 Campo::new("Vel. viaje",            "mm/s", "Velocidad de viaje (sin extrusión) en mm/s", 150.0),
                 Campo::new("Temp. hotend",          "°C",   "Temperatura del hotend", 200.0),
                 Campo::new("Temp. cama",            "°C",   "Temperatura de la cama caliente", 60.0),
+                Campo::new("% Infill",              "%",    "Densidad de relleno. 0=hueco, 20=estándar, 100=sólido", 20.0),
+                Campo::new("Retracción",            "mm",   "Distancia de retracción. 0=sin retracción. Bowen: ~5mm, directo: ~0.8mm", 0.8),
             ],
             slicer_foco:      0,
             slicer_resultado: None,
@@ -465,6 +471,8 @@ impl App {
             velocidad_viaje:     self.slicer_campos[SC_VEL_VIAJE].parsed()   as f32,
             temp_hotend:         self.slicer_campos[SC_TEMP_HOTEND].parsed() as u32,
             temp_cama:           self.slicer_campos[SC_TEMP_CAMA].parsed()   as u32,
+            infill_densidad:     self.slicer_campos[SC_INFILL].parsed()      as f32,
+            retraccion_mm:       self.slicer_campos[SC_RETRACCION].parsed()  as f32,
             nombre_archivo:      nombre,
         }
     }
@@ -802,12 +810,12 @@ fn render(f: &mut Frame, app: &App) {
 
     // Modal de confirmación de salida (siempre encima de todo)
     if app.confirmar_salida {
-        render_confirmar_salida(f, size);
+        render_confirmar_salida(f, app, size);
     }
 }
 
-fn render_confirmar_salida(f: &mut Frame, area: Rect) {
-    let popup = centered_rect(40, 35, area);
+fn render_confirmar_salida(f: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(38, 30, area);
     f.render_widget(Clear, popup);
 
     let bloque = Block::default()
@@ -818,6 +826,20 @@ fn render_confirmar_salida(f: &mut Frame, area: Rect) {
     let inner = bloque.inner(popup);
     f.render_widget(bloque, popup);
 
+    let btn = |label: &'static str, activo: bool| {
+        if activo {
+            Span::styled(
+                format!(" {} ", label),
+                Style::default().fg(AZUL).bg(ORO).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(
+                format!(" {} ", label),
+                Style::default().fg(GRIS).bg(Color::Rgb(40, 40, 40)).add_modifier(Modifier::BOLD),
+            )
+        }
+    };
+
     let texto = vec![
         Line::from(""),
         Line::from(vec![
@@ -826,13 +848,16 @@ fn render_confirmar_salida(f: &mut Frame, area: Rect) {
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Presioná  Q  para confirmar", st(CELESTE)),
+            Span::raw("    "),
+            btn("  Sí, salir  ", app.confirmar_opcion),
+            Span::raw("   "),
+            btn("  No, volver  ", !app.confirmar_opcion),
         ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Cualquier otra tecla cancela", st(GRIS)),
-        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  ←→  seleccionar  ·  Enter  confirmar",
+            st_italic(GRIS),
+        )),
     ];
     f.render_widget(Paragraph::new(texto), inner);
 }
@@ -1766,6 +1791,25 @@ fn main() -> io::Result<()> {
         let animando = matches!(app.pantalla, PantallaActiva::Vista3D) && app.auto_rotar;
         if !animando || event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                if app.confirmar_salida {
+                    match key.code {
+                        KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
+                            app.confirmar_opcion = !app.confirmar_opcion;
+                        }
+                        KeyCode::Enter => {
+                            if app.confirmar_opcion { app.guardar_estado(); break; }
+                            app.confirmar_salida = false;
+                            app.confirmar_opcion = false;
+                        }
+                        KeyCode::Esc => {
+                            app.confirmar_salida = false;
+                            app.confirmar_opcion = false;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 match (key.code, key.modifiers) {
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                         app.guardar_estado(); break;
@@ -1773,11 +1817,10 @@ fn main() -> io::Result<()> {
                     (KeyCode::Char('q'), _) | (KeyCode::Esc, _)
                         if matches!(app.pantalla, PantallaActiva::Principal) =>
                     {
-                        if app.confirmar_salida { app.guardar_estado(); break; }
                         app.confirmar_salida = true;
+                        app.confirmar_opcion = false;
                     }
                     _ => {
-                        app.confirmar_salida = false;
                         app.handle_key(key);
                     }
                 }

@@ -1,25 +1,35 @@
 // ──────────────────────────────────────────────────────────────────────────────
 // G-code generator
 //
-// Itera sobre las capas y sus shells de perímetro (exterior primero, interiores
-// después) y genera G-code compatible con Marlin / Klipper.
+// Itera sobre las capas, sus shells de perímetro y los segmentos de infill,
+// y genera G-code compatible con Marlin / Klipper.
 //
 // Convenciones:
 //   G21 — mm,  G90 — absoluto,  M82 — extrusión absoluta
 //   Velocidades en mm/min (F = vel_mm_s × 60)
+//
+// Funcionalidades:
+//   - Primera capa al 50% de velocidad para mejor adhesión
+//   - Ventilador (M106 S255) desde la segunda capa
+//   - Retracción / unretracción en viajes largos
+//   - Infill después de los perímetros de cada capa
 // ──────────────────────────────────────────────────────────────────────────────
 
 use super::{calc_extrusion_mm, ResultadoSlicing, SlicerConfig};
 
 /// Genera el G-code completo para el resultado de slicing dado.
 pub fn generar_gcode(resultado: &ResultadoSlicing, config: &SlicerConfig) -> String {
-    let puntos_totales: usize = resultado.capas.iter()
+    let pts_perim: usize = resultado.capas.iter()
         .flat_map(|c| c.perimetros.iter())
         .flat_map(|isla| isla.iter())
         .map(|shell| shell.len())
         .sum();
+    let pts_infill: usize = resultado.capas.iter()
+        .flat_map(|c| c.infill.iter())
+        .map(|isla| isla.len())
+        .sum();
 
-    let mut out = String::with_capacity(puntos_totales * 80 + 2048);
+    let mut out = String::with_capacity((pts_perim + pts_infill * 2) * 80 + 2048);
 
     escribir_header(&mut out, resultado, config);
     escribir_start_gcode(&mut out, config);
@@ -44,12 +54,15 @@ fn escribir_header(out: &mut String, r: &ResultadoSlicing, cfg: &SlicerConfig) {
     out.push_str(&format!("; Capas             : {}\n", r.capas.len()));
     out.push_str(&format!("; Altura de capa    : {:.3} mm\n", cfg.altura_capa));
     out.push_str(&format!("; Perímetros/isla   : {}\n", cfg.n_perimetros));
+    out.push_str(&format!("; Infill            : {:.0}%\n", cfg.infill_densidad));
     out.push_str(&format!("; Boquilla          : {:.2} mm\n", cfg.diametro_boquilla));
     out.push_str(&format!("; Filamento         : {:.2} mm diámetro\n", cfg.diametro_filamento));
     out.push_str(&format!("; Temp hotend       : {}°C\n", cfg.temp_hotend));
     out.push_str(&format!("; Temp cama         : {}°C\n", cfg.temp_cama));
-    out.push_str(&format!("; Vel. impresión    : {:.0} mm/s\n", cfg.velocidad_impresion));
+    out.push_str(&format!("; Vel. impresión    : {:.0} mm/s  (1ª capa {:.0} mm/s)\n",
+        cfg.velocidad_impresion, cfg.velocidad_impresion * 0.5));
     out.push_str(&format!("; Vel. viaje        : {:.0} mm/s\n", cfg.velocidad_viaje));
+    out.push_str(&format!("; Retracción        : {:.2} mm\n", cfg.retraccion_mm));
     out.push_str(&format!("; Tiempo estimado   : {}h {:02}m\n", h, m));
     out.push_str(&format!("; Filamento (est.)  : {:.1} mm  /  {:.2} g (ref. PLA)\n",
         r.filamento_mm, gramos));
@@ -61,6 +74,7 @@ fn escribir_start_gcode(out: &mut String, cfg: &SlicerConfig) {
     out.push_str("G21        ; unidades en mm\n");
     out.push_str("G90        ; posicionamiento absoluto\n");
     out.push_str("M82        ; extrusión absoluta\n");
+    out.push_str("M107       ; ventilador apagado (primera capa sin cooling)\n");
     out.push_str(&format!("M140 S{}   ; temperatura cama (no bloquea)\n", cfg.temp_cama));
     out.push_str(&format!("M104 S{}  ; temperatura hotend (no bloquea)\n", cfg.temp_hotend));
     out.push_str(&format!("M190 S{}   ; esperar cama\n", cfg.temp_cama));
@@ -75,37 +89,41 @@ fn escribir_start_gcode(out: &mut String, cfg: &SlicerConfig) {
 }
 
 fn escribir_capas(out: &mut String, resultado: &ResultadoSlicing, cfg: &SlicerConfig) {
-    let vel_print = cfg.velocidad_impresion * 60.0; // mm/s → mm/min
-    let vel_viaje = cfg.velocidad_viaje     * 60.0;
-    let num_capas = resultado.capas.len();
+    let vel_viaje  = cfg.velocidad_viaje as f64 * 60.0;
+    let num_capas  = resultado.capas.len();
+    let retrae     = cfg.retraccion_mm > 0.0;
 
-    let mut e:   f64           = 0.0;   // extrusión acumulada (modo absoluto M82)
-    let mut pos: Option<[f32; 2]> = None; // posición actual XY
+    let mut e:          f64              = 0.0;
+    let mut pos:        Option<[f32; 2]> = None;
+    let mut retractado: bool             = false;
 
     for (n_capa, capa) in resultado.capas.iter().enumerate() {
+        // Primera capa al 50% de velocidad para mejor adhesión a la cama
+        let vel_print = if n_capa == 0 {
+            cfg.velocidad_impresion * 0.5 * 60.0
+        } else {
+            cfg.velocidad_impresion * 60.0
+        } as f64;
+
         out.push_str(&format!("\n; --- Capa {}/{} · z={:.3} mm ---\n",
             n_capa + 1, num_capas, capa.z));
 
+        // Encender ventilador a partir de la segunda capa
+        if n_capa == 1 {
+            out.push_str("M106 S255  ; ventilador al 100%\n");
+        }
+
         out.push_str(&format!("G0 Z{:.3} F3000\n", capa.z));
 
-        // Iterar islas y sus shells: exterior primero, interiores después
+        // ── Perímetros (exterior → interiores) ──────────────────────────────
         for isla in &capa.perimetros {
             for shell in isla {
-                if shell.len() < 2 {
-                    continue;
-                }
-
+                if shell.len() < 2 { continue; }
                 let primer_pt = shell[0];
 
-                // Viaje al inicio del shell
-                if pos.map_or(true, |p| distancia_2d(p, primer_pt) > 0.5) {
-                    out.push_str(&format!(
-                        "G0 X{:.3} Y{:.3} F{:.0}\n",
-                        primer_pt[0], primer_pt[1], vel_viaje,
-                    ));
-                }
+                viajar(out, &mut e, &mut pos, &mut retractado,
+                       primer_pt, vel_viaje, cfg, retrae);
 
-                // Trazar el shell cerrando el loop
                 let n_pts = shell.len();
                 for i in 1..=n_pts {
                     let desde = shell[(i - 1) % n_pts];
@@ -122,13 +140,66 @@ fn escribir_capas(out: &mut String, resultado: &ResultadoSlicing, cfg: &SlicerCo
                 pos = Some(shell[n_pts - 1]);
             }
         }
+
+        // ── Infill ───────────────────────────────────────────────────────────
+        for isla_inf in &capa.infill {
+            for seg in isla_inf {
+                let d = distancia_2d(seg[0], seg[1]);
+                if d < 0.01 { continue; }
+
+                viajar(out, &mut e, &mut pos, &mut retractado,
+                       seg[0], vel_viaje, cfg, retrae);
+
+                e += calc_extrusion_mm(d, cfg) as f64;
+                out.push_str(&format!(
+                    "G1 X{:.3} Y{:.3} E{:.5} F{:.0}\n",
+                    seg[1][0], seg[1][1], e, vel_print,
+                ));
+                pos = Some(seg[1]);
+            }
+        }
+    }
+}
+
+/// Emite un viaje (con retracción/unretracción si corresponde).
+///
+/// Solo retrae si la distancia supera el diámetro de la boquilla para evitar
+/// micro-retracciones inútiles en movimientos cortos entre shells adyacentes.
+fn viajar(
+    out:         &mut String,
+    e:           &mut f64,
+    pos:         &mut Option<[f32; 2]>,
+    retractado:  &mut bool,
+    destino:     [f32; 2],
+    vel_viaje:   f64,
+    cfg:         &SlicerConfig,
+    retrae:      bool,
+) {
+    let dist = pos.map_or(f32::MAX, |p| distancia_2d(p, destino));
+    if dist <= 0.5 {
+        return; // ya estamos cerca, sin viaje
+    }
+
+    if retrae && !*retractado && dist > cfg.diametro_boquilla {
+        *e -= cfg.retraccion_mm as f64;
+        out.push_str(&format!("G1 E{:.5} F2700  ; retracción\n", e));
+        *retractado = true;
+    }
+
+    out.push_str(&format!("G0 X{:.3} Y{:.3} F{:.0}\n", destino[0], destino[1], vel_viaje));
+
+    if *retractado {
+        *e += cfg.retraccion_mm as f64;
+        out.push_str(&format!("G1 E{:.5} F2700  ; unretracción\n", e));
+        *retractado = false;
     }
 }
 
 fn escribir_end_gcode(out: &mut String) {
     out.push_str("\n; === FIN ===\n");
+    out.push_str("M107         ; apagar ventilador\n");
     out.push_str("G91          ; relativo\n");
-    out.push_str("G1 E-2 F2700 ; retracción\n");
+    out.push_str("G1 E-2 F2700 ; retracción final\n");
     out.push_str("G1 Z10 F3000 ; levantar boquilla\n");
     out.push_str("G90          ; volver a absoluto\n");
     out.push_str("G28 X Y      ; home XY\n");
