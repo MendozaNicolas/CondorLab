@@ -98,7 +98,8 @@ const SC_TEMP_CAMA:   usize = 7;
 const SC_INFILL:       usize = 8;
 const SC_RETRACCION:   usize = 9;
 const SC_CAP_SOLIDAS:  usize = 10;
-const NUM_SLICER_CAMPOS: usize = 11;
+const SC_Z_HOP:        usize = 11;
+const NUM_SLICER_CAMPOS: usize = 12;
 
 #[derive(Default)]
 struct Calc {
@@ -325,6 +326,12 @@ struct App {
     slicer_offset:    [f32; 2],   // XY relativo al centro de la cama (mm)
     slicer_rot_z:     f32,         // rotación en Z (grados)
     slicer_escala:    f32,         // escala uniforme
+    // cámara 3D del slicer
+    slicer_cam_x:     f32,
+    slicer_cam_y:     f32,
+    slicer_cam_auto:  bool,
+    slicer_bandeja_solida: bool,
+    slicer_zoom: f32,
 }
 
 impl App {
@@ -389,6 +396,7 @@ impl App {
                 Campo::new("% Infill",              "%",    "Densidad de relleno. 0=hueco, 20=estándar, 100=sólido", 20.0),
                 Campo::new("Retracción",            "mm",   "Distancia de retracción. 0=sin retracción. Bowen: ~5mm, directo: ~0.8mm", 0.8),
                 Campo::new("Capas sólidas top/bot", "",     "Capas sólidas en techo y base del modelo (recomendado: 3-4)", 3.0),
+                Campo::new("Z-hop",                "mm",   "Levantar boquilla en viajes para evitar arrastre. 0=desactivado. Típico: 0.1-0.2mm", 0.1),
             ],
             slicer_foco:      0,
             slicer_resultado: None,
@@ -397,6 +405,11 @@ impl App {
             slicer_offset:    [0.0, 0.0],
             slicer_rot_z:     0.0,
             slicer_escala:    1.0,
+            slicer_cam_x:    -0.30,
+            slicer_cam_y:     0.40,
+            slicer_cam_auto:  false,
+            slicer_bandeja_solida: false,
+            slicer_zoom: 1.0,
         };
 
         // Restaurar valores guardados de los campos
@@ -492,6 +505,8 @@ impl App {
             infill_densidad:     self.slicer_campos[SC_INFILL].parsed()       as f32,
             retraccion_mm:       self.slicer_campos[SC_RETRACCION].parsed()   as f32,
             capas_solidas:       self.slicer_campos[SC_CAP_SOLIDAS].parsed()  as u32,
+            z_hop_mm:            self.slicer_campos[SC_Z_HOP].parsed()        as f32,
+            densidad_material:   config::MATERIALES[self.material_idx].densidad,
             nombre_archivo:      nombre,
         }
     }
@@ -687,6 +702,35 @@ impl App {
                     (KeyCode::Char('0'), KeyModifiers::CONTROL) => {
                         self.reset_slicer_transform();
                     }
+                    // ── Cámara 3D del slicer ───────────────────────────────
+                    (KeyCode::Char('j'), _) => {
+                        self.slicer_cam_y -= 0.12;
+                        self.slicer_cam_auto = false;
+                    }
+                    (KeyCode::Char('k'), _) => {
+                        self.slicer_cam_y += 0.12;
+                        self.slicer_cam_auto = false;
+                    }
+                    (KeyCode::Char('u'), _) => {
+                        self.slicer_cam_x -= 0.12;
+                        self.slicer_cam_auto = false;
+                    }
+                    (KeyCode::Char('n'), _) => {
+                        self.slicer_cam_x += 0.12;
+                        self.slicer_cam_auto = false;
+                    }
+                    (KeyCode::Char(' '), _) => {
+                        self.slicer_cam_auto = !self.slicer_cam_auto;
+                    }
+                    (KeyCode::Char('b'), _) => {
+                        self.slicer_bandeja_solida = !self.slicer_bandeja_solida;
+                    }
+                    (KeyCode::Char('+') | KeyCode::Char('='), _) => {
+                        self.slicer_zoom = (self.slicer_zoom * 1.15).min(10.0);
+                    }
+                    (KeyCode::Char('-'), _) => {
+                        self.slicer_zoom = (self.slicer_zoom / 1.15).max(0.1);
+                    }
                     // ── Edición de campos ───────────────────────────────────
                     (KeyCode::Char('r'), _) => {
                         self.slicer_campos[self.slicer_foco].valor.clear();
@@ -745,6 +789,10 @@ impl App {
             }
             (KeyCode::Char('x'), _) if self.info_stl.is_some() => {
                 self.pantalla = PantallaActiva::Slicer;
+                self.slicer_cam_x    = -0.30;
+                self.slicer_cam_y    =  0.40;
+                self.slicer_cam_auto =  true;
+                self.slicer_zoom     =  1.0;
             }
             (KeyCode::Char('r'), _) => {
                 self.campos[self.foco].valor.clear();
@@ -1721,7 +1769,7 @@ fn render_popup_slicer(f: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(st(ORO))
         .title(Span::styled(
-            format!(" ☀  SLICER  —  {}  —  Enter slicear  g guardar gcode  Esc cerrar ", nombre_stl),
+            format!(" ☀  SLICER  —  {}  —  Enter slicear  g gcode  j/k/u/n cámara  Spc auto  Esc cerrar ", nombre_stl),
             st_bold(ORO),
         ));
 
@@ -1814,7 +1862,7 @@ fn render_slicer_config(f: &mut Frame, app: &App, area: Rect) {
 fn render_slicer_resultado(f: &mut Frame, app: &App, area: Rect) {
     let bloque = Block::default()
         .borders(Borders::NONE)
-        .title(Span::styled(" BANDEJA / RESULTADO ", st_bold(CELESTE)));
+        .title(Span::styled(" VISTA 3D / BANDEJA ", st_bold(CELESTE)));
 
     let inner = bloque.inner(area);
     f.render_widget(bloque, area);
@@ -1823,94 +1871,132 @@ fn render_slicer_resultado(f: &mut Frame, app: &App, area: Rect) {
     let cama_x = perfil.cama_x;
     let cama_y = perfil.cama_y;
 
-    // ── Vista superior de la bandeja ─────────────────────────────────────────
-    // Calculamos el footprint del objeto transformado sobre la cama
-    let footprint: Option<[f32; 4]> = app.info_stl.as_ref().map(|stl| {
-        let tris = aplicar_transform_slicer(
+    // ── Layout: vista 3D arriba, stats compactos abajo ───────────────────────
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(5)])
+        .split(inner);
+
+    let view_area  = layout[0];
+    let stats_area = layout[1];
+
+    // ── Escena 3D: STL transformado + bandeja ────────────────────────────────
+    // Remapeo de ejes: printer [X, Y, Z_altura] → wireframe [X, Z_altura, Y]
+    // La permutación (py↔pz) tiene det=-1 (cambia la mano), lo que invierte
+    // todos los normales. Se corrige revirtiendo el winding (swap vért. 1↔2).
+    let remap_tri = |tri: &[[f32; 3]; 3]| -> [[f32; 3]; 3] {
+        let r = |v: [f32; 3]| [v[0], v[2], v[1]];
+        [r(tri[0]), r(tri[2]), r(tri[1])]   // ← swap 1↔2 para compensar det=-1
+    };
+
+    let bounds: Option<[f32; 4]>;   // [x0, x1, y0, y1] del objeto
+
+    if let Some(stl) = &app.info_stl {
+        let tris_tx = aplicar_transform_slicer(
             &stl.tris,
             app.slicer_escala, app.slicer_rot_z, app.slicer_offset, cama_x, cama_y,
         );
-        let x0 = tris.iter().flat_map(|t| t.iter()).map(|v| v[0]).fold(f32::MAX, f32::min);
-        let x1 = tris.iter().flat_map(|t| t.iter()).map(|v| v[0]).fold(f32::MIN, f32::max);
-        let y0 = tris.iter().flat_map(|t| t.iter()).map(|v| v[1]).fold(f32::MAX, f32::min);
-        let y1 = tris.iter().flat_map(|t| t.iter()).map(|v| v[1]).fold(f32::MIN, f32::max);
-        [x0, x1, y0, y1]
-    });
 
-    // Grid de la bandeja: 28 cols × 12 filas
-    const GW: usize = 28;
-    const GH: usize = 12;
-    let mut grid = [[false; GW]; GH];
+        let x0 = tris_tx.iter().flat_map(|t| t.iter()).map(|v| v[0]).fold(f32::MAX, f32::min);
+        let x1 = tris_tx.iter().flat_map(|t| t.iter()).map(|v| v[0]).fold(f32::MIN, f32::max);
+        let y0 = tris_tx.iter().flat_map(|t| t.iter()).map(|v| v[1]).fold(f32::MAX, f32::min);
+        let y1 = tris_tx.iter().flat_map(|t| t.iter()).map(|v| v[1]).fold(f32::MIN, f32::max);
+        bounds = Some([x0, x1, y0, y1]);
 
-    // Marcar el footprint del objeto en la cuadrícula
-    if let Some([x0, x1, y0, y1]) = footprint {
-        let map_x = |x: f32| ((x / cama_x) * (GW as f32)).clamp(0.0, GW as f32 - 1.0) as usize;
-        let map_y = |y: f32| (GH - 1).saturating_sub(((y / cama_y) * (GH as f32)).clamp(0.0, GH as f32 - 1.0) as usize);
-        let (gx0, gx1) = (map_x(x0), map_x(x1));
-        let (gy1, gy0) = (map_y(y0), map_y(y1)); // y invertida en pantalla
-        for gy in gy0..=gy1.min(GH-1) {
-            for gx in gx0..=gx1.min(GW-1) {
-                grid[gy][gx] = true;
+        // Bandeja en printer-space con normal +pz (apunta arriba)
+        let zb = -1.0f32;
+        let bed_printer: [[[f32; 3]; 3]; 2] = [
+            [[0.0, 0.0, zb], [cama_x, 0.0, zb], [cama_x, cama_y, zb]],
+            [[0.0, 0.0, zb], [cama_x, cama_y, zb], [0.0,  cama_y, zb]],
+        ];
+
+        // Aplicar remap (con corrección de winding) a modelo y bandeja
+        let model_w: Vec<[[f32; 3]; 3]> = tris_tx.iter().map(|t| remap_tri(t)).collect();
+        let bed_w:   Vec<[[f32; 3]; 3]> = bed_printer.iter().map(|t| remap_tri(t)).collect();
+
+        // Normalizar el modelo solo; aplicar la misma transformación a la bandeja
+        // (si se normalizaran juntos, la bandeja 220mm haría al modelo microscópico)
+        let model_norm: Vec<[[f32; 3]; 3]> = wireframe::normalizar(&model_w);
+
+        // Calcular centro y escala del bounding box del modelo en espacio wireframe
+        let (model_center, model_sc) = {
+            let mut mn = [f32::MAX; 3];
+            let mut mx = [f32::MIN; 3];
+            for tri in &model_w {
+                for v in tri {
+                    for i in 0..3 {
+                        if v[i] < mn[i] { mn[i] = v[i]; }
+                        if v[i] > mx[i] { mx[i] = v[i]; }
+                    }
+                }
             }
-        }
+            let c = [(mn[0]+mx[0])/2.0, (mn[1]+mx[1])/2.0, (mn[2]+mx[2])/2.0];
+            let sc = [(mx[0]-mn[0]), (mx[1]-mn[1]), (mx[2]-mn[2])]
+                .iter().cloned().fold(0.0f32, f32::max) / 2.0;
+            (c, if sc == 0.0 { 1.0 } else { sc })
+        };
+
+        // Aplicar la misma normalización a la bandeja
+        let bed_norm: Vec<[[f32; 3]; 3]> = bed_w.iter().map(|tri| {
+            std::array::from_fn(|i| [
+                (tri[i][0] - model_center[0]) / model_sc,
+                (tri[i][1] - model_center[1]) / model_sc,
+                (tri[i][2] - model_center[2]) / model_sc,
+            ])
+        }).collect();
+
+        let model_normals = wireframe::calcular_normales_suaves(&model_norm);
+
+        let w = view_area.width  as usize;
+        let h = view_area.height as usize;
+        let mut fb = wireframe::Framebuffer::new(w, h);
+
+        let zoom = w.min(h * 2) as f32 * 0.70 * app.slicer_zoom;
+
+        // Paso 1: modelo sólido con la paleta del usuario
+        wireframe::renderizar(
+            &mut fb, &model_norm, &model_normals,
+            app.slicer_cam_x, app.slicer_cam_y, 0.0,
+            zoom, 0,
+        );
+
+        // Paso 2: bandeja encima (sólido gris o wireframe según toggle con 'b')
+        let modo_bandeja = if app.slicer_bandeja_solida { 0 } else { 1 };
+        wireframe::renderizar_sobre(
+            &mut fb, &bed_norm, &[],
+            app.slicer_cam_x, app.slicer_cam_y, 0.0,
+            zoom, modo_bandeja,
+        );
+
+        f.render_widget(
+            Paragraph::new(wireframe::fb_a_lineas(&fb, app.paleta_3d)),
+            view_area,
+        );
+    } else {
+        bounds = None;
+        f.render_widget(
+            Paragraph::new(Span::styled("  Sin modelo STL cargado.", st_italic(GRIS))),
+            view_area,
+        );
     }
 
-    // Verificar si el objeto entra en la cama
-    let dentro = footprint.map_or(true, |[x0, x1, y0, y1]| {
+    // ── Stats compactos ───────────────────────────────────────────────────────
+    let dentro = bounds.map_or(true, |[x0, x1, y0, y1]| {
         x0 >= 0.0 && x1 <= cama_x && y0 >= 0.0 && y1 <= cama_y
     });
+    let color_cama = if dentro { CELESTE } else { Color::LightRed };
 
     let mut lineas: Vec<Line> = Vec::new();
 
-    // Título de la bandeja
-    let color_cama = if dentro { CELESTE } else { Color::LightRed };
+    // Línea 1: perfil + advertencia
     lineas.push(Line::from(vec![
-        Span::styled(format!(" {} — ", perfil.nombre), st_bold(color_cama)),
-        Span::styled(format!("{:.0}×{:.0} mm", cama_x, cama_y), st(GRIS)),
+        Span::styled(format!(" {} ", perfil.nombre), st_bold(color_cama)),
+        Span::styled(format!("{:.0}×{:.0}mm", cama_x, cama_y), st(GRIS)),
         if !dentro { Span::styled("  ⚠ OBJETO FUERA", st_bold(Color::LightRed)) }
         else       { Span::raw("") },
     ]));
 
-    // Dibujar la cuadrícula
-    lineas.push(Line::from(vec![
-        Span::styled(" ┌", st(GRIS)),
-        Span::styled("─".repeat(GW), st(GRIS)),
-        Span::styled("┐", st(GRIS)),
-    ]));
-    for (gy, fila) in grid.iter().enumerate() {
-        let mut spans = vec![Span::styled(" │", st(GRIS))];
-        for &tiene_obj in fila {
-            if tiene_obj {
-                spans.push(Span::styled("▓", st(ORO)));
-            } else {
-                spans.push(Span::styled("·", st(Color::Rgb(40, 40, 50))));
-            }
-        }
-        // Mostrar escala en el lado derecho cada 3 filas
-        spans.push(Span::styled("│", st(GRIS)));
-        if gy == 0 {
-            spans.push(Span::styled(format!(" y={:.0}", cama_y), st(GRIS)));
-        } else if gy == GH - 1 {
-            spans.push(Span::styled(" y=0", st(GRIS)));
-        }
-        lineas.push(Line::from(spans));
-    }
-    lineas.push(Line::from(vec![
-        Span::styled(" └", st(GRIS)),
-        Span::styled("─".repeat(GW), st(GRIS)),
-        Span::styled("┘", st(GRIS)),
-    ]));
-    lineas.push(Line::from(vec![
-        Span::styled("  x=0", st(GRIS)),
-        Span::styled(
-            format!("{:>width$}", format!("x={:.0}", cama_x), width = GW - 2),
-            st(GRIS)
-        ),
-    ]));
-
-    // ── Resultado del slicing ─────────────────────────────────────────────────
-    lineas.push(Line::from(""));
-
+    // Línea 2: estado del slicer
     if let Some(ref estado) = app.slicer_estado {
         let color = if estado.starts_with("Error") { Color::LightRed }
                     else if estado.starts_with("Guardado") { Color::Green }
@@ -1918,49 +2004,42 @@ fn render_slicer_resultado(f: &mut Frame, app: &App, area: Rect) {
         lineas.push(Line::from(Span::styled(format!(" {}", estado), st_bold(color))));
     } else {
         lineas.push(Line::from(Span::styled(
-            " Enter para slicear  ·  posicioná con Shift/Ctrl+flechas",
+            " Enter slicear · Shift/Ctrl+flechas posicionar",
             st_italic(GRIS),
         )));
     }
 
+    // Línea 3: resultado del slicing
     if let Some(ref r) = app.slicer_resultado {
-        let h = r.tiempo_min as u32 / 60;
-        let m = r.tiempo_min as u32 % 60;
+        let ht = r.tiempo_min as u32 / 60;
+        let mt = r.tiempo_min as u32 % 60;
         let radio   = app.slicer_campos[SC_FILAMENTO].parsed() / 2.0;
         let vol_cm3 = r.filamento_mm * std::f64::consts::PI * radio * radio / 1000.0;
         let gramos  = vol_cm3 * config::MATERIALES[app.material_idx].densidad;
-
-        lineas.push(Line::from(""));
         lineas.push(Line::from(vec![
-            Span::styled(" Capas ", st(GRIS)),      Span::styled(format!("{}  ", r.capas.len()), st_bold(BLANCO)),
-            Span::styled("Fil. ", st(GRIS)),         Span::styled(format!("{:.0}mm  ", r.filamento_mm), st_bold(CELESTE)),
-            Span::styled("Mat. ", st(GRIS)),         Span::styled(format!("{:.1}g  ", gramos), st_bold(ORO)),
-            Span::styled("Tiempo ", st(GRIS)),       Span::styled(format!("{}h {:02}m", h, m), st_bold(BLANCO)),
+            Span::styled(" Cap ", st(GRIS)),  Span::styled(format!("{}  ", r.capas.len()), st_bold(BLANCO)),
+            Span::styled("Fil ", st(GRIS)),   Span::styled(format!("{:.0}mm  ", r.filamento_mm), st_bold(CELESTE)),
+            Span::styled("Mat ", st(GRIS)),   Span::styled(format!("{:.1}g  ", gramos), st_bold(ORO)),
+            Span::styled("T ", st(GRIS)),     Span::styled(format!("{}h{:02}m", ht, mt), st_bold(BLANCO)),
         ]));
-
-        if !r.capas.is_empty() {
-            lineas.push(Line::from(""));
-            lineas.push(Line::from(Span::styled(" ── Capas ──────────────────────", st(GRIS))));
-            let max_ver = (inner.height as usize).saturating_sub(lineas.len() + 1);
-            for capa in r.capas.iter().take(max_ver) {
-                let n_shells: usize = capa.perimetros.iter().map(|i| i.len()).sum();
-                let n_inf: usize    = capa.infill.iter().map(|i| i.len()).sum();
-                lineas.push(Line::from(vec![
-                    Span::styled(format!(" z={:.3} ", capa.z), st(CELESTE)),
-                    Span::styled(format!("{}sh ", n_shells), st(GRIS)),
-                    Span::styled(format!("{}inf", n_inf), st(Color::Rgb(120, 120, 60))),
-                ]));
-            }
-            if r.capas.len() > max_ver {
-                lineas.push(Line::from(Span::styled(
-                    format!(" … y {} capas más", r.capas.len() - max_ver),
-                    st_italic(GRIS),
-                )));
-            }
-        }
+    } else {
+        lineas.push(Line::from(""));
     }
 
-    f.render_widget(Paragraph::new(lineas), inner);
+    // Línea 4: hints de cámara
+    let auto_str = if app.slicer_cam_auto { "auto⟳" } else { "auto " };
+    let bandeja_str = if app.slicer_bandeja_solida { "bandeja■" } else { "bandeja□" };
+    lineas.push(Line::from(vec![
+        Span::styled(" j/k ", st_bold(ORO)), Span::styled("girar  ", st(GRIS)),
+        Span::styled("u/n ", st_bold(ORO)), Span::styled("inclinar  ", st(GRIS)),
+        Span::styled("Spc ", st_bold(ORO)), Span::styled(auto_str, st(GRIS)),
+    ]));
+    lineas.push(Line::from(vec![
+        Span::styled(" b ", st_bold(ORO)), Span::styled(bandeja_str, st(GRIS)),
+        Span::styled("  +/- ", st_bold(ORO)), Span::styled("zoom", st(GRIS)),
+    ]));
+
+    f.render_widget(Paragraph::new(lineas), stats_area);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -2003,11 +2082,15 @@ fn main() -> io::Result<()> {
             app.rot_y += 0.030;
             app.rot_x += 0.011;
         }
+        if matches!(app.pantalla, PantallaActiva::Slicer) && app.slicer_cam_auto {
+            app.slicer_cam_y += 0.020;
+        }
 
         terminal.draw(|f| render(f, &app))?;
 
         // Con animación usamos poll con timeout; sin animación bloqueamos
-        let animando = matches!(app.pantalla, PantallaActiva::Vista3D) && app.auto_rotar;
+        let animando = (matches!(app.pantalla, PantallaActiva::Vista3D) && app.auto_rotar)
+                    || (matches!(app.pantalla, PantallaActiva::Slicer) && app.slicer_cam_auto);
         if !animando || event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 if app.confirmar_salida {

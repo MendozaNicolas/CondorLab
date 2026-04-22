@@ -46,6 +46,10 @@ pub struct SlicerConfig {
     pub retraccion_mm: f32,
     /// Capas sólidas top y bottom (típico: 3-4)
     pub capas_solidas: u32,
+    /// Altura de z-hop durante viajes en mm (0 = sin z-hop)
+    pub z_hop_mm: f32,
+    /// Densidad del material en g/cm³ (para estimar peso en el header)
+    pub densidad_material: f64,
 }
 
 impl Default for SlicerConfig {
@@ -63,6 +67,8 @@ impl Default for SlicerConfig {
             infill_densidad:     20.0,
             retraccion_mm:       0.8,
             capas_solidas:       3,
+            z_hop_mm:            0.1,
+            densidad_material:   1.24,
         }
     }
 }

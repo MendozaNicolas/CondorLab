@@ -33,33 +33,34 @@ pub fn generar_shells(contorno: &Contorno, n: u32, ancho_linea: f32) -> Vec<Cont
         return shells;
     }
 
-    // Pre-convertir el contorno a formato clipper2 (Vec de tuplas f64)
-    let pts_f64: Vec<(f64, f64)> = contorno
-        .iter()
-        .map(|p| (p[0] as f64, p[1] as f64))
-        .collect();
+    // Encadenar: cada shell se computa del anterior con un delta de 1×ancho_linea.
+    // Esto es más correcto que computar i×ancho desde el original, especialmente
+    // para formas cóncavas donde los offsets acumulados difieren.
+    let delta = -(ancho_linea as f64);
 
-    for i in 1..n {
-        let delta = -(i as f64 * ancho_linea as f64);
+    for _ in 1..n {
+        let base = shells.last().unwrap();
+        let pts_f64: Vec<(f64, f64)> = base
+            .iter()
+            .map(|p| (p[0] as f64, p[1] as f64))
+            .collect();
 
-        // Convertir a Paths (un solo camino cerrado)
-        let paths: Paths = pts_f64.clone().into();
-
-        // Offset hacia adentro
+        let paths: Paths = pts_f64.into();
         let resultado = inflate(paths, delta, JoinType::Miter, EndType::Polygon, 2.0);
-        // Simplificar para eliminar puntos extra que introduce inflate
         let resultado = simplify(resultado, 0.005, false);
 
-        // Convertir de vuelta a nuestros Contornos
         let coords: Vec<Vec<(f64, f64)>> = resultado.into();
-        for pts in coords {
-            if pts.len() >= 3 {
-                let shell: Contorno = pts
-                    .iter()
-                    .map(|&(x, y)| [x as f32, y as f32])
-                    .collect();
+        // Tomar el polígono más grande del resultado (el contorno interior principal)
+        let mejor = coords.into_iter()
+            .filter(|pts| pts.len() >= 3)
+            .max_by_key(|pts| pts.len());
+
+        match mejor {
+            Some(pts) => {
+                let shell: Contorno = pts.iter().map(|&(x, y)| [x as f32, y as f32]).collect();
                 shells.push(shell);
             }
+            None => break, // el contorno es demasiado pequeño para seguir encogiendo
         }
     }
 

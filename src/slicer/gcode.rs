@@ -47,7 +47,7 @@ fn escribir_header(out: &mut String, r: &ResultadoSlicing, cfg: &SlicerConfig) {
 
     let radio   = cfg.diametro_filamento as f64 / 2.0;
     let vol_cm3 = r.filamento_mm * std::f64::consts::PI * radio * radio / 1000.0;
-    let gramos  = vol_cm3 * 1.24; // referencia PLA
+    let gramos  = vol_cm3 * cfg.densidad_material;
 
     out.push_str("; Generado por CondorLab Slicer\n");
     out.push_str(&format!("; Archivo           : {}\n", cfg.nombre_archivo));
@@ -64,7 +64,7 @@ fn escribir_header(out: &mut String, r: &ResultadoSlicing, cfg: &SlicerConfig) {
     out.push_str(&format!("; Vel. viaje        : {:.0} mm/s\n", cfg.velocidad_viaje));
     out.push_str(&format!("; Retracción        : {:.2} mm\n", cfg.retraccion_mm));
     out.push_str(&format!("; Tiempo estimado   : {}h {:02}m\n", h, m));
-    out.push_str(&format!("; Filamento (est.)  : {:.1} mm  /  {:.2} g (ref. PLA)\n",
+    out.push_str(&format!("; Filamento (est.)  : {:.1} mm  /  {:.2} g\n",
         r.filamento_mm, gramos));
     out.push('\n');
 }
@@ -122,7 +122,7 @@ fn escribir_capas(out: &mut String, resultado: &ResultadoSlicing, cfg: &SlicerCo
                 let primer_pt = shell[0];
 
                 viajar(out, &mut e, &mut pos, &mut retractado,
-                       primer_pt, vel_viaje, cfg, retrae);
+                       primer_pt, capa.z, vel_viaje, cfg, retrae);
 
                 let n_pts = shell.len();
                 for i in 1..=n_pts {
@@ -148,7 +148,7 @@ fn escribir_capas(out: &mut String, resultado: &ResultadoSlicing, cfg: &SlicerCo
                 if d < 0.01 { continue; }
 
                 viajar(out, &mut e, &mut pos, &mut retractado,
-                       seg[0], vel_viaje, cfg, retrae);
+                       seg[0], capa.z, vel_viaje, cfg, retrae);
 
                 e += calc_extrusion_mm(d, cfg) as f64;
                 out.push_str(&format!(
@@ -161,16 +161,18 @@ fn escribir_capas(out: &mut String, resultado: &ResultadoSlicing, cfg: &SlicerCo
     }
 }
 
-/// Emite un viaje (con retracción/unretracción si corresponde).
+/// Emite un viaje (con retracción, z-hop y unretracción si corresponde).
 ///
 /// Solo retrae si la distancia supera el diámetro de la boquilla para evitar
 /// micro-retracciones inútiles en movimientos cortos entre shells adyacentes.
+/// El z-hop solo se aplica cuando hay retracción (viajes largos).
 fn viajar(
     out:         &mut String,
     e:           &mut f64,
     pos:         &mut Option<[f32; 2]>,
     retractado:  &mut bool,
     destino:     [f32; 2],
+    z_actual:    f32,
     vel_viaje:   f64,
     cfg:         &SlicerConfig,
     retrae:      bool,
@@ -180,13 +182,24 @@ fn viajar(
         return; // ya estamos cerca, sin viaje
     }
 
+    let hace_hop = retrae && cfg.z_hop_mm > 0.0 && dist > cfg.diametro_boquilla;
+
     if retrae && !*retractado && dist > cfg.diametro_boquilla {
         *e -= cfg.retraccion_mm as f64;
         out.push_str(&format!("G1 E{:.5} F2700  ; retracción\n", e));
         *retractado = true;
     }
 
+    if hace_hop && *retractado {
+        out.push_str(&format!("G0 Z{:.3} F3000  ; z-hop\n",
+            z_actual + cfg.z_hop_mm));
+    }
+
     out.push_str(&format!("G0 X{:.3} Y{:.3} F{:.0}\n", destino[0], destino[1], vel_viaje));
+
+    if hace_hop && *retractado {
+        out.push_str(&format!("G0 Z{:.3} F3000  ; bajar\n", z_actual));
+    }
 
     if *retractado {
         *e += cfg.retraccion_mm as f64;

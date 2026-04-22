@@ -178,7 +178,29 @@ pub fn renderizar(
     modo_wire: u8,
 ) {
     fb.clear();
+    renderizar_impl(fb, tris, normals, rx, ry, rz, zoom, modo_wire);
+}
 
+/// Como `renderizar` pero sin limpiar el framebuffer — permite capas sobre un render previo.
+pub fn renderizar_sobre(
+    fb:        &mut Framebuffer,
+    tris:      &[[[f32;3];3]],
+    normals:   &[[[f32;3];3]],
+    rx: f32, ry: f32, rz: f32,
+    zoom: f32,
+    modo_wire: u8,
+) {
+    renderizar_impl(fb, tris, normals, rx, ry, rz, zoom, modo_wire);
+}
+
+fn renderizar_impl(
+    fb:        &mut Framebuffer,
+    tris:      &[[[f32;3];3]],
+    normals:   &[[[f32;3];3]],
+    rx: f32, ry: f32, rz: f32,
+    zoom: f32,
+    modo_wire: u8,
+) {
     let zoom = if zoom <= 0.0 {
         fb.char_w.min(fb.char_h) as f32 * 0.70
     } else { zoom };
